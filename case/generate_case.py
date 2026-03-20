@@ -1,140 +1,98 @@
 """
 Sofle Procyon case generator.
 
+Modifies the Tempest Sofle Case (by kb-elmo/GarrettFaucher) to add
+a Procyon 57x80mm touchpad cutout on the right half.
+
+Base design: https://github.com/GarrettFaucher/Tempest-Sofle-Case
+Reference STEP files are in ./reference/
+
+Requirements:
+    conda install -c conda-forge cadquery
+    # OR use Fusion360 with the STEP files directly
+
 Usage:
     python generate_case.py
-
-Generates STL files for left and right halves.
-Dimensions are derived from PCB scans in ../scans/
-
-Dependencies:
-    pip install cadquery
-    # For visualization: pip install jupyter-cadquery
 """
 
 import cadquery as cq
+import os
 
 # =============================================================================
-# PCB Dimensions — UPDATE THESE FROM SCANS
-# All measurements in mm
+# Procyon Touchpad Dimensions (from george-norton/procyon 57x80 variant)
 # =============================================================================
 
-# PCB outline points (x, y) — trace from scan
-# Placeholder: rough rectangle. Replace with actual traced outline.
-PCB_WIDTH = 130.0      # left-right extent of one half
-PCB_HEIGHT = 110.0     # top-bottom extent of one half
-PCB_THICKNESS = 1.6    # standard PCB thickness
-PCB_CORNER_RADIUS = 3.0
-
-# Mounting hole positions (x, y) relative to PCB bottom-left — measure from scan
-MOUNT_HOLES = [
-    # (x, y) — placeholder positions, replace with actual
-    (5, 5),
-    (125, 5),
-    (5, 105),
-    (125, 105),
-    (65, 55),
-]
-MOUNT_HOLE_DIAMETER = 2.5  # M2.5
-
-# Touchpad cutout (right half only) — position relative to PCB origin
-TOUCHPAD_X = 40.0       # left edge of cutout
-TOUCHPAD_Y = 20.0       # bottom edge of cutout
-TOUCHPAD_WIDTH = 57.0   # Procyon 57x80
-TOUCHPAD_HEIGHT = 80.0
+TOUCHPAD_WIDTH = 57.0       # mm (X direction)
+TOUCHPAD_HEIGHT = 80.0      # mm (Y direction)
+TOUCHPAD_THICKNESS = 1.6    # mm (PCB thickness)
 TOUCHPAD_CORNER_RADIUS = 2.0
+TOUCHPAD_CLEARANCE = 0.5    # extra mm on each side for fit
 
-# Encoder cutout (left half only)
-ENCODER_X = 10.0
-ENCODER_Y = 50.0
-ENCODER_DIAMETER = 7.0
+# Cutout dimensions (touchpad + clearance)
+CUTOUT_WIDTH = TOUCHPAD_WIDTH + 2 * TOUCHPAD_CLEARANCE
+CUTOUT_HEIGHT = TOUCHPAD_HEIGHT + 2 * TOUCHPAD_CLEARANCE
 
-# USB-C cutout
-USB_WIDTH = 12.0
-USB_HEIGHT = 7.0
+# Position of touchpad center relative to the right half case center
+# ADJUST THESE after scanning PCB — these are estimates
+TOUCHPAD_OFFSET_X = 0.0     # mm from case center (positive = right)
+TOUCHPAD_OFFSET_Y = -5.0    # mm from case center (positive = up)
 
-# =============================================================================
-# Case Parameters
-# =============================================================================
-
-WALL_THICKNESS = 2.0
-BOTTOM_THICKNESS = 2.0
-CASE_HEIGHT = 10.0       # total internal height above PCB bottom
-PCB_STANDOFF_HEIGHT = 3.0  # PCB sits this high above case floor
-STANDOFF_OUTER_DIAMETER = 5.0
+# Lip to hold touchpad (sits on a ledge inside the cutout)
+LIP_WIDTH = 1.5             # mm ledge around cutout
+LIP_DEPTH = 1.0             # mm below top surface
 
 
-def make_base_shell(width, height):
-    """Create the basic case shell."""
-    case = (
-        cq.Workplane("XY")
-        .rect(width + 2 * WALL_THICKNESS, height + 2 * WALL_THICKNESS)
-        .extrude(CASE_HEIGHT + BOTTOM_THICKNESS)
-        .edges("|Z").fillet(PCB_CORNER_RADIUS + WALL_THICKNESS)
+def modify_right_top():
+    """Load the Tempest Top and add a touchpad cutout for the right half."""
+    top = cq.importers.importStep("reference/Tempest Top.step")
+    bb = top.val().BoundingBox()
+
+    # Center of the case
+    cx = (bb.xmin + bb.xmax) / 2 + TOUCHPAD_OFFSET_X
+    cy = (bb.ymin + bb.ymax) / 2 + TOUCHPAD_OFFSET_Y
+
+    # Cut the touchpad opening through the top
+    top = (
+        top.workplane(origin=(cx, cy, bb.zmax), normal=(0, 0, 1))
+        .rect(CUTOUT_WIDTH, CUTOUT_HEIGHT)
+        .cutThruAll()
     )
 
-    # Hollow out
-    case = (
-        case.faces(">Z").workplane()
-        .rect(width, height)
-        .cutBlind(-(CASE_HEIGHT))
-        .edges("|Z and (not <Z)").fillet(PCB_CORNER_RADIUS)
+    # Add a lip/ledge for the touchpad to sit on
+    top = (
+        top.workplane(origin=(cx, cy, bb.zmax - LIP_DEPTH), normal=(0, 0, 1))
+        .rect(CUTOUT_WIDTH + 2 * LIP_WIDTH, CUTOUT_HEIGHT + 2 * LIP_WIDTH)
+        .rect(CUTOUT_WIDTH, CUTOUT_HEIGHT, forConstruction=True)
+        .cutBlind(-LIP_DEPTH)
     )
 
-    return case
+    return top
 
 
-def add_standoffs(case, mount_holes, width, height):
-    """Add PCB mounting standoffs."""
-    # Offset mount holes to case coordinate system (centered)
-    offset_holes = [(x - width / 2, y - height / 2) for x, y in mount_holes]
-
-    case = (
-        case.faces("<Z").workplane(offset=BOTTOM_THICKNESS)
-        .pushPoints(offset_holes)
-        .circle(STANDOFF_OUTER_DIAMETER / 2)
-        .extrude(PCB_STANDOFF_HEIGHT)
-    )
-
-    # Drill screw holes through standoffs
-    case = (
-        case.faces("<Z").workplane()
-        .pushPoints(offset_holes)
-        .hole(MOUNT_HOLE_DIAMETER, BOTTOM_THICKNESS + PCB_STANDOFF_HEIGHT)
-    )
-
-    return case
-
-
-def make_left_half():
-    """Generate the left half case."""
-    case = make_base_shell(PCB_WIDTH, PCB_HEIGHT)
-    case = add_standoffs(case, MOUNT_HOLES, PCB_WIDTH, PCB_HEIGHT)
-    # TODO: Add encoder cutout, USB-C cutout
-    return case
-
-
-def make_right_half():
-    """Generate the right half case (with touchpad cutout)."""
-    case = make_base_shell(PCB_WIDTH, PCB_HEIGHT)
-    case = add_standoffs(case, MOUNT_HOLES, PCB_WIDTH, PCB_HEIGHT)
-    # TODO: Add touchpad cutout, USB-C cutout
-    return case
+def mirror_for_right(shape):
+    """Mirror the left-half case to create a right half."""
+    return shape.mirror("YZ")
 
 
 if __name__ == "__main__":
-    import os
-
     os.makedirs("releases", exist_ok=True)
 
-    print("Generating left half...")
-    left = make_left_half()
-    cq.exporters.export(left, "releases/sofle_procyon_left.stl")
-    print("  -> releases/sofle_procyon_left.stl")
+    print("Loading Tempest Top...")
+    print("NOTE: Adjust TOUCHPAD_OFFSET_X/Y after scanning the PCB")
+    print()
 
-    print("Generating right half...")
-    right = make_right_half()
-    cq.exporters.export(right, "releases/sofle_procyon_right.stl")
-    print("  -> releases/sofle_procyon_right.stl")
+    try:
+        right_top = modify_right_top()
+        cq.exporters.export(right_top, "releases/procyon_right_top.step")
+        cq.exporters.export(right_top, "releases/procyon_right_top.stl")
+        print("-> releases/procyon_right_top.step")
+        print("-> releases/procyon_right_top.stl")
+    except Exception as e:
+        print(f"CadQuery error: {e}")
+        print()
+        print("If CadQuery/OCP is not installed, modify the STEP files")
+        print("directly in Fusion360. See MODIFICATION_GUIDE.md")
 
-    print("Done! Update dimensions in this file after scanning the PCB.")
+    print()
+    print("Left half: use Tempest Top/Bottom unchanged (reference/)")
+    print("Right half bottom: use Tempest Bottom unchanged (reference/)")
