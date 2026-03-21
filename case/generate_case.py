@@ -2,235 +2,284 @@
 """
 Sofle Procyon case generator.
 
-Generates OpenSCAD files for left and right halves.
-Right half includes a cutout for the Procyon 57x80 touchpad.
+Generates OpenSCAD files for:
+- Left bottom (PCB tray with standoffs)
+- Left top plate (4.8mm with 14mm switch cutouts)
+- Right bottom (PCB tray with standoffs)
+- Right top plate (4.8mm with switch cutouts + trackpad cutout)
 
 Usage:
     python generate_case.py
-    # Then open the .scad files in OpenSCAD to preview and export STL
-
-Dependencies:
-    pip install solidpython2
-    OpenSCAD (for rendering): /Applications/OpenSCAD.app or brew install openscad
+    # Open .scad files in OpenSCAD to preview (F5) and render (F6)
 """
 
 from solid2 import *
-from solid2.extensions.bosl2 import *
-import subprocess, os, sys
+import json, os
+
+# Load PCB data
+with open(os.path.join(os.path.dirname(__file__), 'pcb_data.json')) as f:
+    D = json.load(f)
 
 # =============================================================================
-# PCB Dimensions (measured from 300 DPI scan)
+# Parameters
 # =============================================================================
 
-LEFT_PCB_W = 139.9    # mm
-LEFT_PCB_H = 111.3    # mm
-RIGHT_PCB_W = 160.9   # mm (21mm wider on split side for touchpad)
-RIGHT_PCB_H = 112.8   # mm
-PCB_THICKNESS = 1.6    # mm
+PLATE_THICKNESS = 4.8       # top plate thickness
+SWITCH_CUTOUT = 14.0        # MX switch hole size
+SWITCH_CORNER_R = 0.5       # slight corner radius on cutouts
 
-# The right half is wider on the split (inner) side
-EXTRA_WIDTH = RIGHT_PCB_W - LEFT_PCB_W  # ~21mm
+# MX clip notches (top and bottom of each switch cutout)
+CLIP_WIDTH = 5.0            # width of clip notch
+CLIP_DEPTH = 1.0            # how far notch extends beyond the 14mm cutout
+CLIP_HEIGHT = 3.8           # height of notch (from bottom of plate)
+# With 4.8mm plate, this leaves a 1mm ledge at the top
 
-# =============================================================================
-# Touchpad (Procyon 57x80)
-# =============================================================================
+BOTTOM_WALL = 2.0           # bottom case wall thickness
+BOTTOM_FLOOR = 2.0          # floor thickness
+BOTTOM_HEIGHT = 8.0         # internal height
+PCB_STANDOFF_H = 3.0        # PCB sits this high
+STANDOFF_OD = 5.0           # standoff outer diameter
+SCREW_D = 2.25              # through-hole diameter (matches PCB holes)
 
-TP_W = 57.0           # mm
-TP_H = 80.0           # mm
-TP_THICKNESS = 1.6    # mm
-TP_CLEARANCE = 0.5    # mm per side
-TP_CUTOUT_W = TP_W + 2 * TP_CLEARANCE   # 58mm
-TP_CUTOUT_H = TP_H + 2 * TP_CLEARANCE   # 81mm
+OUTLINE_EXPAND = 1.5        # how much to expand outline for case walls
+CORNER_R = 1.5              # corner rounding radius
 
-# Position: inner (split) side of right half, centered vertically
-# X measured from the inner edge of the right half
-TP_CENTER_X = TP_W / 2   # 28.5mm from split edge
-TP_CENTER_Y = 0           # centered vertically
+TP_CLEARANCE = 0.5          # trackpad cutout clearance per side (only used if no tower)
 
-# =============================================================================
-# Case Parameters — TWEAK THESE
-# =============================================================================
+# Trackpad tower (print-in-place design)
+TP_KEY_HEIGHT = 12.5        # key top height above plate surface
+TP_THICKNESS = 1.65         # touchpad PCB thickness
+TP_FILM = 0.4              # top film layer (pause print before this to insert pad)
+TP_WALL = 0.4              # side wall thickness around touchpad
+TP_CABLE_EDGE = 5.0        # support edge around cable cutout
+TP_TOWER_H = TP_KEY_HEIGHT  # 12.5mm total (from plate top to key top)
+TP_PLATFORM_H = TP_TOWER_H - TP_FILM - TP_THICKNESS  # 10.45mm
 
-WALL = 2.0              # wall thickness
-FLOOR = 2.0             # bottom thickness
-FILLET_R = 3.0           # corner radius
-CASE_H = 10.0           # internal height (above floor)
-STANDOFF_H = 3.0        # PCB sits this high above floor
-STANDOFF_OD = 5.0       # standoff outer diameter
-SCREW_D = 2.5           # M2.5 screw hole
-
-# Lip to hold touchpad from above
-LIP_W = 1.5             # lip ledge width
-LIP_DEPTH = TP_THICKNESS + 0.3  # how deep the lip pocket is
-
-# USB-C cutout
-USB_W = 12.0
-USB_H = 7.0
-USB_Z_OFFSET = STANDOFF_H + PCB_THICKNESS / 2  # center on PCB edge
-
-# =============================================================================
-# Mounting holes — PLACEHOLDER positions, adjust after test fit
-# Measured from bottom-left corner of each PCB
-# =============================================================================
-
-LEFT_MOUNT_HOLES = [
-    (10, 10),
-    (130, 10),
-    (10, 101),
-    (130, 101),
-    (70, 55),
-]
-
-RIGHT_MOUNT_HOLES = [
-    (10, 10),
-    (151, 10),
-    (10, 103),
-    (151, 103),
-    (80, 55),
-]
+USB_CUTOUT_W = 9.0          # USB-C port cutout width (along port direction)
+USB_CUTOUT_H = 0.5          # USB-C port cutout height (tiny protrusion above PCB)
+USB_CUTOUT_D = 6.5          # USB-C port cutout depth (into the plate from bottom)
 
 
-# =============================================================================
-# Generator functions
-# =============================================================================
+def flip_y(data):
+    """Flip Y coordinates (scan Y-down to OpenSCAD Y-up)."""
+    h = data.get('pcb_h_mm', max(p[1] for p in data['outline_mm']))
+    flipped = dict(data)
+    flipped['outline_mm'] = [(x, h - y) for x, y in data['outline_mm']]
+    flipped['switches'] = [{'x': s['x'], 'y': round(h - s['y'], 2), 'rotation': -s.get('rotation', 0)} for s in data['switches']]
+    flipped['holes'] = [{'x': ho['x'], 'y': round(h - ho['y'], 2), 'd': ho.get('d', SCREW_D)} for ho in data.get('holes', [])]
+    flipped['usbc'] = [{'x': u['x'], 'y': round(h - u['y'], 2), 'w': u.get('w', 9), 'h': u.get('h', 3.5), 'rotation': u.get('rotation', 0)} for u in data.get('usbc', [])]
+    flipped['resets'] = [{'x': r['x'], 'y': round(h - r['y'], 2)} for r in data.get('resets', [])]
+    if data.get('encoder'):
+        e = data['encoder']
+        flipped['encoder'] = {'x': e['x'], 'y': round(h - e['y'], 2), 'r': e.get('r', 6)}
+    if data.get('trackpad'):
+        t = data['trackpad']
+        flipped['trackpad'] = {'x': t['x'], 'y': round(h - t['y'], 2), 'w': t['w'], 'h': t['h']}
+    return flipped
 
-def rounded_box(w, h, z, r):
-    """Box with rounded vertical edges."""
-    return minkowski()(
-        cube([w - 2*r, h - 2*r, z/2], center=True),
-        cylinder(r=r, h=z/2, center=True, _fn=32)
+def outline_to_polygon(outline_pts):
+    """Convert outline points [(x,y),...] to an OpenSCAD polygon."""
+    # Remove zero-length edges
+    cleaned = [outline_pts[0]]
+    for p in outline_pts[1:]:
+        if p != cleaned[-1]:
+            cleaned.append(p)
+    return polygon(cleaned)
+
+
+def rounded_outline(outline_pts, corner_r=CORNER_R):
+    """Create outline with rounded corners."""
+    return offset(r=corner_r)(offset(delta=-corner_r)(outline_to_polygon(outline_pts)))
+
+
+def expanded_outline(outline_pts, expand):
+    """Create an expanded version of the outline with rounded corners."""
+    return offset(r=expand)(rounded_outline(outline_pts))
+
+
+def make_top_plate(side):
+    """Generate a top plate with switch cutouts."""
+    data = flip_y(D[side])
+    outline = data.get('constructed_outline', data['outline_mm'])
+    switches = data['switches']
+
+    # Base plate from PCB outline
+    plate = linear_extrude(PLATE_THICKNESS)(
+        expanded_outline(outline, OUTLINE_EXPAND)
     )
 
+    # Cut switch holes with clip notches
+    for sw in switches:
+        # Main 14mm through-hole
+        cut = cube([SWITCH_CUTOUT, SWITCH_CUTOUT, PLATE_THICKNESS + 2], center=True)
 
-def case_shell(pcb_w, pcb_h):
-    """Hollow case shell for one half."""
-    outer_w = pcb_w + 2 * WALL
-    outer_h = pcb_h + 2 * WALL
-    total_h = CASE_H + FLOOR
+        # Clip notches: top and bottom of the cutout, centered on X
+        # They extend CLIP_DEPTH beyond the 14mm hole on the Y axis
+        # Height is CLIP_HEIGHT from the bottom, leaving a ledge at the top
+        notch_y_offset = SWITCH_CUTOUT / 2 + CLIP_DEPTH / 2
+        notch = cube([CLIP_WIDTH, CLIP_DEPTH, CLIP_HEIGHT], center=True)
+        # Position notch: bottom-aligned (center at CLIP_HEIGHT/2 from z=0)
+        notch_z = -PLATE_THICKNESS / 2 + CLIP_HEIGHT / 2
+        top_notch = translate([0, notch_y_offset, notch_z])(notch)
+        bottom_notch = translate([0, -notch_y_offset, notch_z])(notch)
 
-    outer = rounded_box(outer_w, outer_h, total_h, FILLET_R)
-    outer = up(total_h / 2)(outer)
+        switch_cut = cut + top_notch + bottom_notch
 
-    # Hollow interior
-    inner = rounded_box(pcb_w, pcb_h, CASE_H + 1, FILLET_R - WALL/2)
-    inner = up(FLOOR + CASE_H / 2 + 0.5)(inner)
+        if sw.get('rotation', 0):
+            switch_cut = rotate([0, 0, sw['rotation']])(switch_cut)
+        switch_cut = translate([sw['x'], sw['y'], PLATE_THICKNESS / 2])(switch_cut)
+        plate -= switch_cut
 
-    return outer - inner
-
-
-def standoffs(mount_holes, pcb_w, pcb_h):
-    """PCB mounting standoffs with screw holes."""
-    posts = None
-    holes = None
-    for (x, y) in mount_holes:
-        # Convert from PCB coords (bottom-left origin) to centered coords
-        cx = x - pcb_w / 2
-        cy = y - pcb_h / 2
-        post = translate([cx, cy, FLOOR])(
-            cylinder(d=STANDOFF_OD, h=STANDOFF_H, _fn=24)
+    # Cut mounting holes through plate
+    for h in data.get('holes', []):
+        plate -= translate([h['x'], h['y'], -1])(
+            cylinder(d=SCREW_D, h=PLATE_THICKNESS + 2, _fn=16)
         )
-        hole = translate([cx, cy, 0])(
-            cylinder(d=SCREW_D, h=FLOOR + STANDOFF_H + 1, _fn=16)
+
+    # Cut encoder hole (same as switch cutout + side notches)
+    if data.get('encoder'):
+        enc = data['encoder']
+        # Main 14mm square through-hole
+        enc_cut = cube([SWITCH_CUTOUT, SWITCH_CUTOUT, PLATE_THICKNESS + 2], center=True)
+
+        # Top/bottom clip notches (same as switch)
+        notch_y_offset = SWITCH_CUTOUT / 2 + CLIP_DEPTH / 2
+        notch = cube([CLIP_WIDTH, CLIP_DEPTH, CLIP_HEIGHT], center=True)
+        notch_z = -PLATE_THICKNESS / 2 + CLIP_HEIGHT / 2
+        enc_cut += translate([0, notch_y_offset, notch_z])(notch)
+        enc_cut += translate([0, -notch_y_offset, notch_z])(notch)
+
+        # Left/right side notches: 7mm wide, 2mm deep, 2.5mm height from bottom
+        ENC_SIDE_W = 7.0
+        ENC_SIDE_DEPTH = 2.0
+        ENC_SIDE_H = 2.5
+        side_notch = cube([ENC_SIDE_DEPTH, ENC_SIDE_W, ENC_SIDE_H], center=True)
+        side_x_offset = SWITCH_CUTOUT / 2 + ENC_SIDE_DEPTH / 2
+        side_z = -PLATE_THICKNESS / 2 + ENC_SIDE_H / 2
+        enc_cut += translate([side_x_offset, 0, side_z])(side_notch)
+        enc_cut += translate([-side_x_offset, 0, side_z])(side_notch)
+
+        enc_cut = translate([enc['x'], enc['y'], PLATE_THICKNESS / 2])(enc_cut)
+        plate -= enc_cut
+
+    # Trackpad tower (print-in-place, right half)
+    if data.get('trackpad'):
+        tp = data['trackpad']
+        tp_w = tp['w']  # 57.2
+        tp_h = tp['h']  # 80.0
+        outer_w = tp_w + 2 * TP_WALL
+        outer_h = tp_h + 2 * TP_WALL
+        cable_w = tp_w - 2 * TP_CABLE_EDGE
+        cable_h = tp_h - 2 * TP_CABLE_EDGE
+
+        # Tower sits on top of plate surface (z=PLATE_THICKNESS)
+        # Top edge of tower at y=108 (aligned with top plate edge)
+        tower_top_y = 108.0
+        tower_y = tower_top_y - outer_h / 2
+
+        # Layer 1: Platform (with cable cutout in center)
+        platform = cube([outer_w, outer_h, TP_PLATFORM_H], center=True)
+        cable_cut = cube([cable_w, cable_h, TP_PLATFORM_H + 2], center=True)
+        platform -= cable_cut
+        platform = translate([0, 0, TP_PLATFORM_H / 2])(platform)
+
+        # Layer 2: Touchpad pocket walls (0.4mm walls around the pad)
+        pocket_outer = cube([outer_w, outer_h, TP_THICKNESS], center=True)
+        pocket_inner = cube([tp_w, tp_h, TP_THICKNESS + 2], center=True)
+        pocket_walls = pocket_outer - pocket_inner
+        pocket_walls = translate([0, 0, TP_PLATFORM_H + TP_THICKNESS / 2])(pocket_walls)
+
+        # Layer 3: Film on top (0.4mm solid lid, pause before this to insert pad)
+        film = cube([outer_w, outer_h, TP_FILM], center=True)
+        film = translate([0, 0, TP_PLATFORM_H + TP_THICKNESS + TP_FILM / 2])(film)
+
+        # Combine tower, position on plate top surface, Y-aligned to top edge
+        tower = platform + pocket_walls + film
+        tower = translate([tp['x'], tower_y, PLATE_THICKNESS])(tower)
+        plate += tower
+
+        # Cut cable routing hole through the plate under the tower
+        plate -= translate([tp['x'], tower_y, PLATE_THICKNESS / 2])(
+            cube([cable_w, cable_h, PLATE_THICKNESS + 2], center=True)
         )
-        posts = post if posts is None else posts + post
-        holes = hole if holes is None else holes + hole
-    return posts, holes
+
+    # Cut USB-C port recesses (blind cut from bottom, not through)
+    for port in data.get('usbc', []):
+        usb_cut = cube([USB_CUTOUT_W, USB_CUTOUT_D, USB_CUTOUT_H], center=True)
+        if port.get('rotation', 0):
+            usb_cut = rotate([0, 0, port['rotation']])(usb_cut)
+        # Position at bottom of plate (z = USB_CUTOUT_H/2 from z=0)
+        usb_cut = translate([port['x'], port['y'], USB_CUTOUT_H / 2])(usb_cut)
+        plate -= usb_cut
+
+    return plate
 
 
-def usb_cutout(pcb_w, side="top"):
-    """USB-C port cutout on the PCB edge."""
-    # USB is typically on the top edge, centered
-    y_pos = pcb_w / 2 + WALL  # outer wall position... actually on the narrow edge
-    # For split keyboards, USB is often on the inner or outer edge
-    # Adjust based on actual PCB — placeholder at top center
-    return translate([0, pcb_w / 2, FLOOR + USB_Z_OFFSET])(
-        rotate([90, 0, 0])(
-            cube([USB_W, USB_H, WALL * 3], center=True)
+def make_bottom(side):
+    """Generate a bottom case with walls and PCB standoffs."""
+    data = flip_y(D[side])
+    outline = data.get('constructed_outline', data['outline_mm'])
+    total_h = BOTTOM_FLOOR + BOTTOM_HEIGHT
+
+    # Outer shell
+    outer = linear_extrude(total_h)(
+        expanded_outline(outline, OUTLINE_EXPAND + BOTTOM_WALL)
+    )
+
+    # Inner cavity
+    inner = translate([0, 0, BOTTOM_FLOOR])(
+        linear_extrude(BOTTOM_HEIGHT + 1)(
+            expanded_outline(outline, OUTLINE_EXPAND)
         )
     )
 
+    shell = outer - inner
 
-def touchpad_cutout():
-    """Rectangular cutout for the Procyon touchpad with retention lip."""
-    total_h = CASE_H + FLOOR
+    # Standoffs at mounting holes
+    for h in data.get('holes', []):
+        # Standoff cylinder
+        post = translate([h['x'], h['y'], BOTTOM_FLOOR])(
+            cylinder(d=STANDOFF_OD, h=PCB_STANDOFF_H, _fn=24)
+        )
+        # Screw hole through floor + standoff
+        hole = translate([h['x'], h['y'], -1])(
+            cylinder(d=SCREW_D, h=BOTTOM_FLOOR + PCB_STANDOFF_H + 2, _fn=16)
+        )
+        shell = shell + post - hole
 
-    # Through-cut for touchpad surface
-    cut = cube([TP_CUTOUT_W, TP_CUTOUT_H, WALL + 2], center=True)
-    cut = translate([0, 0, total_h - WALL/2])(cut)
+    # USB-C cutouts through the wall
+    for port in data.get('usbc', []):
+        pw, ph = USB_CUTOUT_W, USB_CUTOUT_H
+        z_center = BOTTOM_FLOOR + PCB_STANDOFF_H + 1  # roughly at PCB level
+        usb_cut = cube([pw, ph, ph], center=True)
+        if port.get('rotation', 0):
+            usb_cut = rotate([0, 0, port['rotation']])(usb_cut)
+        usb_cut = translate([port['x'], port['y'], z_center])(usb_cut)
+        # Make it cut through the wall by extending it outward
+        shell -= usb_cut
 
-    # Lip pocket (wider than cutout, shallower)
-    lip_w = TP_CUTOUT_W + 2 * LIP_W
-    lip_h = TP_CUTOUT_H + 2 * LIP_W
-    lip = cube([lip_w, lip_h, LIP_DEPTH], center=True)
-    lip = translate([0, 0, total_h - WALL - LIP_DEPTH/2 + 0.01])(lip)
-
-    # Subtract the cutout shape so only the lip ledge remains
-    lip_cut = cube([TP_CUTOUT_W, TP_CUTOUT_H, LIP_DEPTH + 1], center=True)
-    lip_cut = translate([0, 0, total_h - WALL - LIP_DEPTH/2])(lip_cut)
-
-    return cut + (lip - lip_cut)
-
-
-def make_left():
-    """Generate left half case."""
-    shell = case_shell(LEFT_PCB_W, LEFT_PCB_H)
-    posts, holes = standoffs(LEFT_MOUNT_HOLES, LEFT_PCB_W, LEFT_PCB_H)
-    return shell + posts - holes
-
-
-def make_right():
-    """Generate right half case with touchpad cutout."""
-    shell = case_shell(RIGHT_PCB_W, RIGHT_PCB_H)
-    posts, holes = standoffs(RIGHT_MOUNT_HOLES, RIGHT_PCB_W, RIGHT_PCB_H)
-
-    # Position touchpad cutout on the split (inner) side
-    # Inner edge is at x = -RIGHT_PCB_W/2 (leftmost in centered coords)
-    # Touchpad center is TP_CENTER_X from that edge
-    tp_x = -RIGHT_PCB_W / 2 + TP_CENTER_X
-    tp_y = TP_CENTER_Y
-
-    tp_cut = translate([tp_x, tp_y, 0])(touchpad_cutout())
-
-    return shell + posts - holes - tp_cut
-
-
-def render_scad(obj, filename):
-    """Save as .scad file."""
-    scad_path = os.path.join("releases", filename)
-    obj.save_as_scad(scad_path)
-    print(f"  -> {scad_path}")
-    return scad_path
-
-
-def render_stl(scad_path):
-    """Render .scad to .stl using OpenSCAD CLI."""
-    stl_path = scad_path.replace(".scad", ".stl")
-    openscad = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
-    if not os.path.exists(openscad):
-        openscad = "openscad"
-    try:
-        subprocess.run([openscad, "-o", stl_path, scad_path],
-                      check=True, capture_output=True, timeout=120)
-        print(f"  -> {stl_path}")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"  STL render skipped ({e}). Open .scad in OpenSCAD to export.")
+    return shell
 
 
 if __name__ == "__main__":
     os.makedirs("releases", exist_ok=True)
 
-    print("Generating Sofle Procyon case...")
-    print(f"  Left:  {LEFT_PCB_W}x{LEFT_PCB_H}mm")
-    print(f"  Right: {RIGHT_PCB_W}x{RIGHT_PCB_H}mm (touchpad: {TP_W}x{TP_H}mm)")
-    print()
+    for side in ['left', 'right']:
+        print(f"Generating {side} half...")
 
-    print("Left half:")
-    left_scad = render_scad(make_left(), "procyon_left.scad")
-    render_stl(left_scad)
+        top = make_top_plate(side)
+        top_path = f"releases/procyon_{side}_top.scad"
+        top.save_as_scad(top_path)
+        print(f"  -> {top_path}")
 
-    print("Right half:")
-    right_scad = render_scad(make_right(), "procyon_right.scad")
-    render_stl(right_scad)
+        bottom = make_bottom(side)
+        bot_path = f"releases/procyon_{side}_bottom.scad"
+        bottom.save_as_scad(bot_path)
+        print(f"  -> {bot_path}")
 
     print("\nDone! Open .scad files in OpenSCAD to preview.")
-    print("Adjust parameters at the top of generate_case.py and re-run.")
+    print("Parameters at the top of generate_case.py:")
+    print(f"  PLATE_THICKNESS = {PLATE_THICKNESS}mm")
+    print(f"  SWITCH_CUTOUT = {SWITCH_CUTOUT}mm")
+    print(f"  BOTTOM_HEIGHT = {BOTTOM_HEIGHT}mm")
+    print(f"  PCB_STANDOFF_H = {PCB_STANDOFF_H}mm")

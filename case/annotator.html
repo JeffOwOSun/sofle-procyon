@@ -33,12 +33,18 @@ canvas { cursor: crosshair; }
     <button id="mode-trackpad" onclick="setMode('trackpad')">Track[P]ad</button>
     <button id="mode-reset" onclick="setMode('reset')">[R]eset</button>
     <button id="mode-outline" onclick="setMode('outline')">[O]utline</button>
+    <button onclick="snapOutline()">Snap outline (N)</button>
+    <div class="sep"></div>
+    <button onclick="alignSelected('y')">Align V</button>
+    <button onclick="alignSelected('x')">Align H</button>
+    <span id="multi-count"></span>
+    <button id="mode-measure" onclick="startMeasure()">[M]easure</button>
     <button id="mode-delete" onclick="setMode('delete')">[D]elete</button>
     <div class="sep"></div>
     <button onclick="saveData()">Save (Ctrl+S)</button>
     <button onclick="exportJSON()">Export JSON</button>
     <div class="sep"></div>
-    <span>Click=place | Drag=move | Scroll=rotate selected switch (Shift=fine) | Del=delete</span>
+    <span>Click=place/drag | Scroll=rotate switch (Shift=fine) | Del=delete | Outline: drag edge, Alt+click=add point, Shift+drag=snap, N=snap all</span>
 </div>
 <div class="main">
     <div class="panel">
@@ -58,7 +64,10 @@ canvas { cursor: crosshair; }
 
 <script>
 const SW = 14, HOLE_D = 2.25;
-let mode = 'switch', selectedItem = null, dragging = null;
+let mode = 'switch', dragging = null;
+let selection = []; // [{side, type, idx}, ...] — always an array
+let rulers = []; // [{side, x1,y1, x2,y2}, ...]
+let measureState = null; // null | {side, x, y} — first point of pending ruler
 const images = {}, ann = { left: {}, right: {} };
 
 // Load data from server
@@ -76,6 +85,7 @@ async function init() {
             encoder: s.encoder ? {...s.encoder} : null,
             trackpad: s.trackpad ? {...s.trackpad} : (side==='right' ? {x:28.5,y:55,w:57.2,h:80} : null),
             outline: s.outline_mm || [],
+            constructed_outline: s.constructed_outline || [],
             scale: s.scale || 25.4/300,
             bbox: s.bbox || [0,0,100,100],
         };
@@ -113,19 +123,54 @@ function draw(side) {
         let [fx,fy]=mm2px(side,a.outline[0][0],a.outline[0][1]); ctx.moveTo(fx,fy);
         for(let i=1;i<a.outline.length;i++) { let [px,py]=mm2px(side,a.outline[i][0],a.outline[i][1]); ctx.lineTo(px,py); }
         ctx.closePath(); ctx.stroke();
+        // Constructed outline (yellow dashed)
+        if(a.constructed_outline && a.constructed_outline.length>1) {
+            ctx.strokeStyle='#ffaa00'; ctx.lineWidth=2; ctx.setLineDash([6,3]); ctx.beginPath();
+            let [cfx,cfy]=mm2px(side,a.constructed_outline[0][0],a.constructed_outline[0][1]); ctx.moveTo(cfx,cfy);
+            for(let ci=1;ci<a.constructed_outline.length;ci++) { let [cpx,cpy]=mm2px(side,a.constructed_outline[ci][0],a.constructed_outline[ci][1]); ctx.lineTo(cpx,cpy); }
+            ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+        }
         if(mode==='outline') a.outline.forEach((pt,i)=>{
             let [px,py]=mm2px(side,pt[0],pt[1]);
-            let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='outline'&&selectedItem.idx===i;
+            let sel=selection.some(s=>s.side===side&&s.type==='outline'&&s.idx===i);
             ctx.fillStyle=sel?'#ffff00':'#00ff00';
             ctx.beginPath(); ctx.arc(px,py,sel?6:4,0,Math.PI*2); ctx.fill();
         });
     }
 
-    // Switches with crosshairs
+    // Switches with crosshairs and labels
     const hw=SW/2/s, cross=hw*1.3;
+    // Build column groups to assign row/col labels
+    const swCols={};
+    a.switches.forEach((sw,i)=>{
+        const cx=Math.round(sw.x);
+        if(!swCols[cx]) swCols[cx]=[];
+        swCols[cx].push({sw,i});
+    });
+    const colXs=Object.keys(swCols).map(Number).sort((a,b)=>a-b);
+    const isRight=side==='right';
+    // Assign labels
+    const swLabels={};
+    const mainCols=colXs.filter(cx=>swCols[cx].length>=3);
+    const thumbCols=colXs.filter(cx=>swCols[cx].length<3);
+    mainCols.forEach((cx,ci)=>{
+        const keys=swCols[cx].sort((a,b)=>a.sw.y-b.sw.y);
+        const colNum=isRight?ci+1:ci;
+        keys.forEach((k,ri)=>{ swLabels[k.i]=`r${ri}c${colNum}`; });
+    });
+    thumbCols.forEach((cx,ti)=>{
+        const keys=swCols[cx].sort((a,b)=>a.sw.y-b.sw.y);
+        keys.forEach((k,ri)=>{
+            let colNum;
+            if(isRight) colNum=ti;
+            else colNum=ti+5;
+            swLabels[k.i]=`r4c${colNum}`;
+        });
+    });
+
     a.switches.forEach((sw,i)=>{
         let [cx,cy]=mm2px(side,sw.x,sw.y);
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='switch'&&selectedItem.idx===i;
+        let sel=selection.some(s=>s.side===side&&s.type==='switch'&&s.idx===i);
         ctx.save(); ctx.translate(cx,cy);
         if(sw.rotation) ctx.rotate(sw.rotation*Math.PI/180);
         ctx.strokeStyle=sel?'#ffff00':'#ff3333'; ctx.lineWidth=sel?3:2;
@@ -134,23 +179,45 @@ function draw(side) {
         ctx.beginPath(); ctx.moveTo(-cross,0); ctx.lineTo(cross,0); ctx.moveTo(0,-cross); ctx.lineTo(0,cross); ctx.stroke();
         ctx.restore();
         ctx.fillStyle='#ff3333'; ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2); ctx.fill();
+        // Label
+        const lbl=swLabels[i]||'';
+        ctx.fillStyle=sel?'#ffff00':'rgba(255,200,200,0.8)'; ctx.font='9px monospace';
+        ctx.fillText(lbl,cx-hw+2,cy-hw+10);
         if(sw.rotation) { ctx.fillStyle='#ff8800'; ctx.font='11px monospace'; ctx.fillText(sw.rotation+'\u00b0',cx+hw+4,cy+4); }
     });
 
-    // Mounting holes
+    // Mounting holes with labels
+    // Sort by Y then X to assign row/col: row 0,1 x col 0,1,2
+    const holeSorted=a.holes.map((h,i)=>({h,i})).sort((a,b)=>a.h.y-b.h.y||a.h.x-b.h.x);
+    const holeLabels={};
+    // Group into rows by Y (within 20mm = same row)
+    const holeRows=[];
+    holeSorted.forEach(({h,i})=>{
+        if(holeRows.length===0||Math.abs(h.y-holeRows[holeRows.length-1][0].h.y)>20) holeRows.push([]);
+        holeRows[holeRows.length-1].push({h,i});
+    });
+    holeRows.forEach((row,ri)=>{
+        row.sort((a,b)=>a.h.x-b.h.x);
+        row.forEach(({h,i},ci)=>{ holeLabels[i]=`H${ri}${ci}`; });
+    });
+
     a.holes.forEach((h,i)=>{
         let [cx,cy]=mm2px(side,h.x,h.y), r=HOLE_D/2/s;
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='hole'&&selectedItem.idx===i;
+        let sel=selection.some(s=>s.side===side&&s.type==='hole'&&s.idx===i);
         ctx.strokeStyle=sel?'#ffff00':'#00ffff'; ctx.lineWidth=2;
         ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
         ctx.strokeStyle=sel?'rgba(255,255,0,0.5)':'rgba(0,255,255,0.4)'; ctx.lineWidth=1;
         ctx.beginPath(); ctx.moveTo(cx-r*2,cy); ctx.lineTo(cx+r*2,cy); ctx.moveTo(cx,cy-r*2); ctx.lineTo(cx,cy+r*2); ctx.stroke();
+        // Label
+        const lbl=holeLabels[i]||`H${i}`;
+        ctx.fillStyle=sel?'#ffff00':'#00ffff'; ctx.font='10px monospace';
+        ctx.fillText(lbl,cx+r*2+3,cy+4);
     });
 
     // USB-C ports
     a.usbc.forEach((p,i)=>{
         let [cx,cy]=mm2px(side,p.x,p.y), pw=(p.w||9)/s, ph=(p.h||3.5)/s;
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='usbc'&&selectedItem.idx===i;
+        let sel=selection.some(s=>s.side===side&&s.type==='usbc'&&s.idx===i);
         ctx.save(); ctx.translate(cx,cy);
         if(p.rotation) ctx.rotate(p.rotation*Math.PI/180);
         ctx.strokeStyle=sel?'#ffff00':'#00aaff'; ctx.lineWidth=3;
@@ -163,7 +230,7 @@ function draw(side) {
     // Encoder
     if(a.encoder) {
         let [cx,cy]=mm2px(side,a.encoder.x,a.encoder.y), r=(a.encoder.r||6)/s;
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='encoder';
+        let sel=selection.some(s=>s.side===side&&s.type==='encoder');
         ctx.strokeStyle=sel?'#ffff00':'#ddaa00'; ctx.lineWidth=3;
         ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(cx-r*.5,cy); ctx.lineTo(cx+r*.5,cy); ctx.moveTo(cx,cy-r*.5); ctx.lineTo(cx,cy+r*.5); ctx.stroke();
@@ -173,7 +240,7 @@ function draw(side) {
     // Trackpad
     if(a.trackpad) {
         let [cx,cy]=mm2px(side,a.trackpad.x,a.trackpad.y), tw=(a.trackpad.w||57.2)/s, th=(a.trackpad.h||80)/s;
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='trackpad';
+        let sel=selection.some(s=>s.side===side&&s.type==='trackpad');
         ctx.strokeStyle=sel?'#ffff00':'#ff66cc'; ctx.lineWidth=3; ctx.setLineDash([8,4]);
         ctx.strokeRect(cx-tw/2,cy-th/2,tw,th); ctx.setLineDash([]);
         ctx.strokeStyle='rgba(255,102,204,0.2)'; ctx.lineWidth=1;
@@ -185,11 +252,55 @@ function draw(side) {
     // Reset buttons
     a.resets.forEach((r,i)=>{
         let [cx,cy]=mm2px(side,r.x,r.y), rr=3/s;
-        let sel=selectedItem&&selectedItem.side===side&&selectedItem.type==='reset'&&selectedItem.idx===i;
+        let sel=selection.some(s=>s.side===side&&s.type==='reset'&&s.idx===i);
         ctx.strokeStyle=sel?'#ffff00':'#ff00ff'; ctx.lineWidth=3;
         ctx.strokeRect(cx-rr,cy-rr,rr*2,rr*2);
         ctx.fillStyle='#ff00ff'; ctx.font='11px monospace'; ctx.fillText('RST#'+i,cx+rr+4,cy+4);
     });
+
+    // Rulers
+    rulers.filter(r=>r.side===side).forEach((ruler,ri)=>{
+        const [x1,y1]=mm2px(side,ruler.x1,ruler.y1);
+        const [x2,y2]=mm2px(side,ruler.x2,ruler.y2);
+        const isSel=selection.some(s=>s.type==='ruler'&&s.idx===ri);
+        const dist=Math.sqrt((ruler.x2-ruler.x1)**2+(ruler.y2-ruler.y1)**2);
+
+        ctx.strokeStyle=isSel?'#ffff00':'#66ccff'; ctx.lineWidth=isSel?3:2;
+
+        // Main line
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+
+        // T-shaped endcaps (perpendicular to ruler line)
+        const len=Math.sqrt((x2-x1)**2+(y2-y1)**2);
+        if(len>1) {
+            const nx=-(y2-y1)/len, ny=(x2-x1)/len; // perpendicular unit vector
+            const cap=8; // cap half-length in pixels
+            ctx.beginPath();
+            ctx.moveTo(x1+nx*cap,y1+ny*cap); ctx.lineTo(x1-nx*cap,y1-ny*cap);
+            ctx.moveTo(x2+nx*cap,y2+ny*cap); ctx.lineTo(x2-nx*cap,y2-ny*cap);
+            ctx.stroke();
+        }
+
+        // Distance label
+        const mx=(x1+x2)/2, my=(y1+y2)/2;
+        ctx.fillStyle=isSel?'#ffff00':'#66ccff';
+        ctx.font='bold 12px monospace';
+        const label=dist.toFixed(1)+'mm';
+        const tw=ctx.measureText(label).width;
+        ctx.fillStyle='rgba(0,0,0,0.7)';
+        ctx.fillRect(mx-tw/2-3,my-8,tw+6,16);
+        ctx.fillStyle=isSel?'#ffff00':'#66ccff';
+        ctx.fillText(label,mx-tw/2,my+4);
+    });
+
+    // Pending measurement first point
+    if(measureState && measureState.side===side) {
+        const [px,py]=mm2px(side,measureState.x,measureState.y);
+        ctx.strokeStyle='#66ccff'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(px,py,6,0,Math.PI*2); ctx.stroke();
+        ctx.fillStyle='#66ccff'; ctx.font='11px monospace';
+        ctx.fillText('Select 2nd point',px+10,py-5);
+    }
 }
 
 function setMode(m) {
@@ -210,23 +321,56 @@ function findNearest(side, type, xmm, ymm, thresh) {
     return best;
 }
 
-function selectItem(side,type,idx) { selectedItem={side,type,idx}; updateSidebar(); draw('left'); draw('right'); }
+function selectItem(side,type,idx,shift) {
+    const item={side,type,idx};
+    if(shift) {
+        const already=selection.findIndex(s=>s.side===side&&s.type===type&&s.idx===idx);
+        if(already>=0) selection.splice(already,1);
+        else selection.push(item);
+    } else {
+        selection=[item];
+    }
+    document.getElementById('multi-count').textContent=selection.length>1?selection.length+' selected':'';
+    updateSidebar(); draw('left'); draw('right');
+}
+function sel0() { return selection.length>0?selection[0]:null; }
+
+function getItemPos(s) {
+    const a=ann[s.side];
+    if(s.type==='switch') return {x:a.switches[s.idx].x, y:a.switches[s.idx].y, side:s.side};
+    if(s.type==='hole') return {x:a.holes[s.idx].x, y:a.holes[s.idx].y, side:s.side};
+    if(s.type==='usbc') return {x:a.usbc[s.idx].x, y:a.usbc[s.idx].y, side:s.side};
+    if(s.type==='reset') return {x:a.resets[s.idx].x, y:a.resets[s.idx].y, side:s.side};
+    if(s.type==='outline') return {x:a.outline[s.idx][0], y:a.outline[s.idx][1], side:s.side};
+    if(s.type==='encoder'&&a.encoder) return {x:a.encoder.x, y:a.encoder.y, side:s.side};
+    if(s.type==='trackpad'&&a.trackpad) return {x:a.trackpad.x, y:a.trackpad.y, side:s.side};
+    return null;
+}
 
 function updateSidebar() {
     const el=document.getElementById('selected-info');
-    if(!selectedItem){el.innerHTML='Click to select';return;}
-    const {side,type,idx}=selectedItem, a=ann[side];
+    const si=sel0();
+    if(!si){el.innerHTML='Click to select';return;}
+    const {side,type,idx}=si, a=ann[side];
+    if(selection.length>1){
+        const positions=selection.map(s=>getItemPos(s)).filter(Boolean);
+        el.innerHTML=`<b>${selection.length} items selected</b><br>Use Align V/H buttons or Measure`;
+        return;
+    }
+    // Show global coordinate
+    const pos=getItemPos(si);
+    const coordStr=pos?`<div style="color:#aaa;margin-bottom:4px">Global: (${pos.x}, ${pos.y}) mm</div>`:'';
 
     if(type==='switch') {
         const sw=a.switches[idx];
-        el.innerHTML=`<b>${side} switch #${idx}</b><br>
+        el.innerHTML=coordStr+`<b>${side} switch #${idx}</b><br>
         X: <input type=number step=0.1 value="${sw.x}" onchange="a=ann['${side}'].switches[${idx}];a.x=+this.value;draw('${side}')"> mm<br>
         Y: <input type=number step=0.1 value="${sw.y}" onchange="a=ann['${side}'].switches[${idx}];a.y=+this.value;draw('${side}')"> mm<br>
         Rot: <input type=number step=1 value="${sw.rotation||0}" onchange="ann['${side}'].switches[${idx}].rotation=+this.value;draw('${side}')"> deg<br>
         <button onclick="deleteSelected()">Delete</button>`;
     } else if(type==='usbc') {
         const p=a.usbc[idx];
-        el.innerHTML=`<b>${side} USB-C #${idx}</b><br>
+        el.innerHTML=coordStr+`<b>${side} USB-C #${idx}</b><br>
         X: <input type=number step=0.1 value="${p.x}" onchange="ann['${side}'].usbc[${idx}].x=+this.value;draw('${side}')"><br>
         Y: <input type=number step=0.1 value="${p.y}" onchange="ann['${side}'].usbc[${idx}].y=+this.value;draw('${side}')"><br>
         W: <input type=number step=0.1 value="${p.w||9}" onchange="ann['${side}'].usbc[${idx}].w=+this.value;draw('${side}')"><br>
@@ -235,44 +379,168 @@ function updateSidebar() {
         <button onclick="deleteSelected()">Delete</button>`;
     } else if(type==='hole') {
         const h=a.holes[idx];
-        el.innerHTML=`<b>${side} hole #${idx}</b> (${HOLE_D}mm)<br>
+        el.innerHTML=coordStr+`<b>${side} hole #${idx}</b> (${HOLE_D}mm)<br>
         X: <input type=number step=0.1 value="${h.x}" onchange="ann['${side}'].holes[${idx}].x=+this.value;draw('${side}')"><br>
         Y: <input type=number step=0.1 value="${h.y}" onchange="ann['${side}'].holes[${idx}].y=+this.value;draw('${side}')"><br>
         <button onclick="deleteSelected()">Delete</button>`;
     } else if(type==='outline') {
         const pt=a.outline[idx];
-        el.innerHTML=`<b>${side} outline #${idx}</b><br>
+        el.innerHTML=coordStr+`<b>${side} outline #${idx}</b><br>
         X: <input type=number step=0.1 value="${pt[0]}" onchange="ann['${side}'].outline[${idx}][0]=+this.value;draw('${side}')"><br>
         Y: <input type=number step=0.1 value="${pt[1]}" onchange="ann['${side}'].outline[${idx}][1]=+this.value;draw('${side}')"><br>
         <button onclick="deleteSelected()">Delete point</button>`;
     } else if(type==='trackpad') {
         const tp=a.trackpad;
-        el.innerHTML=`<b>${side} trackpad</b><br>
+        el.innerHTML=coordStr+`<b>${side} trackpad</b><br>
         X: <input type=number step=0.1 value="${tp.x}" onchange="ann['${side}'].trackpad.x=+this.value;draw('${side}')"><br>
         Y: <input type=number step=0.1 value="${tp.y}" onchange="ann['${side}'].trackpad.y=+this.value;draw('${side}')"><br>
         W: <input type=number step=0.1 value="${tp.w}" onchange="ann['${side}'].trackpad.w=+this.value;draw('${side}')"><br>
         H: <input type=number step=0.1 value="${tp.h}" onchange="ann['${side}'].trackpad.h=+this.value;draw('${side}')"><br>`;
     } else if(type==='reset') {
-        el.innerHTML=`<b>${side} reset #${idx}</b><br>
+        el.innerHTML=coordStr+`<b>${side} reset #${idx}</b><br>
         X: <input type=number step=0.1 value="${a.resets[idx].x}" onchange="ann['${side}'].resets[${idx}].x=+this.value;draw('${side}')"><br>
         Y: <input type=number step=0.1 value="${a.resets[idx].y}" onchange="ann['${side}'].resets[${idx}].y=+this.value;draw('${side}')"><br>
         <button onclick="deleteSelected()">Delete</button>`;
+    } else if(type==='ruler') {
+        const ruler=rulers[idx];
+        const d=Math.sqrt((ruler.x2-ruler.x1)**2+(ruler.y2-ruler.y1)**2);
+        const dx=Math.abs(ruler.x2-ruler.x1), dy=Math.abs(ruler.y2-ruler.y1);
+        el.innerHTML=`<b>${side} ruler #${idx}</b><br>
+        From: (${ruler.x1}, ${ruler.y1})<br>
+        To: (${ruler.x2}, ${ruler.y2})<br>
+        Distance: <b>${d.toFixed(1)}mm</b><br>
+        dX: ${dx.toFixed(1)}mm, dY: ${dy.toFixed(1)}mm<br>
+        <button onclick="deleteSelected()">Delete ruler</button>`;
     } else {
         el.innerHTML=`<b>${side} ${type}</b>`;
     }
 }
 
+function alignSelected(axis) {
+    // Align multi-selected holes on X (vertical alignment) or Y (horizontal alignment)
+    if(selection.length<2){status('Select 2+ items first');return;}
+    const vals = selection.map(s=>{
+        const item=s.type==='hole'?ann[s.side].holes[s.idx]:s.type==='outline'?{x:ann[s.side].outline[s.idx][0],y:ann[s.side].outline[s.idx][1]}:ann[s.side][s.type+'s']?.[s.idx]||ann[s.side][s.type];
+        return axis==='x' ? item.x : item.y;
+    });
+    const avg = r1(vals.reduce((a,b)=>a+b,0)/vals.length);
+    selection.forEach(s=>{
+        const a=ann[s.side];
+        if(s.type==='hole'){if(axis==='x') a.holes[s.idx].x=avg; else a.holes[s.idx].y=avg;}
+        else if(s.type==='outline'){if(axis==='x') a.outline[s.idx][0]=avg; else a.outline[s.idx][1]=avg;}
+        else if(s.type==='switch'){if(axis==='x') a.switches[s.idx].x=avg; else a.switches[s.idx].y=avg;}
+    });
+    selection=[];
+    document.getElementById('multi-count').textContent='';
+    draw('left'); draw('right');
+    status('Aligned '+vals.length+' holes on '+axis.toUpperCase());
+}
+
+function snapOutline() {
+    // Snap all outline points: if two consecutive points are within 5mm in X or Y, align them
+    for(const side of ['left','right']) {
+        const ol=ann[side].outline;
+        for(let pass=0;pass<3;pass++) {
+            for(let i=0;i<ol.length;i++) {
+                const j=(i+1)%ol.length;
+                const dx=Math.abs(ol[j][0]-ol[i][0]), dy=Math.abs(ol[j][1]-ol[i][1]);
+                if(dy<5 && dx>dy) { // near-horizontal, snap Y
+                    const avg=r1((ol[i][1]+ol[j][1])/2);
+                    ol[i]=[ol[i][0],avg]; ol[j]=[ol[j][0],avg];
+                }
+                if(dx<5 && dy>dx) { // near-vertical, snap X
+                    const avg=r1((ol[i][0]+ol[j][0])/2);
+                    ol[i]=[avg,ol[i][1]]; ol[j]=[avg,ol[j][1]];
+                }
+            }
+        }
+    }
+    draw('left'); draw('right');
+    status('Outline snapped');
+}
+
+function snapPointToNeighbors(side, idx) {
+    // Snap a single point to align H/V with its prev/next neighbors
+    const ol=ann[side].outline;
+    const prev=ol[(idx-1+ol.length)%ol.length];
+    const next=ol[(idx+1)%ol.length];
+    const pt=ol[idx];
+    // Snap X to whichever neighbor is closer in X
+    if(Math.abs(pt[0]-prev[0])<5) ol[idx]=[prev[0],pt[1]];
+    else if(Math.abs(pt[0]-next[0])<5) ol[idx]=[next[0],pt[1]];
+    // Snap Y to whichever neighbor is closer in Y
+    pt[1]=ol[idx][1]; // refresh after X snap
+    if(Math.abs(ol[idx][1]-prev[1])<5) ol[idx]=[ol[idx][0],prev[1]];
+    else if(Math.abs(ol[idx][1]-next[1])<5) ol[idx]=[ol[idx][0],next[1]];
+}
+
+function startMeasure() {
+    if(selection.length>=2) {
+        // Two items selected: create ruler between them
+        const p1=getItemPos(selection[0]), p2=getItemPos(selection[1]);
+        if(p1&&p2&&p1.side===p2.side) {
+            rulers.push({side:p1.side, x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y});
+            status('Ruler created: '+Math.sqrt((p2.x-p1.x)**2+(p2.y-p1.y)**2).toFixed(1)+'mm');
+        } else if(p1&&p2) {
+            status('Cannot measure across halves');
+        }
+        measureState=null;
+    } else if(selection.length===1) {
+        // One item selected: set as first point, prompt for second
+        const p=getItemPos(selection[0]);
+        if(p) {
+            measureState={side:p.side, x:p.x, y:p.y};
+            setMode('measure');
+            status('Click second point to measure');
+        }
+    } else {
+        // No selection: enter measure mode, prompt for first point
+        setMode('measure');
+        measureState=null;
+        status('Click first point to measure');
+    }
+    draw('left'); draw('right');
+}
+
+function findNearestRuler(side, xmm, ymm, thresh) {
+    let best=-1, bd=thresh;
+    rulers.forEach((r,i)=>{
+        if(r.side!==side) return;
+        // Distance from point to line segment
+        const dx=r.x2-r.x1, dy=r.y2-r.y1, len2=dx*dx+dy*dy;
+        if(len2<0.01) return;
+        let t=Math.max(0,Math.min(1,((xmm-r.x1)*dx+(ymm-r.y1)*dy)/len2));
+        const px=r.x1+t*dx, py=r.y1+t*dy;
+        const d=Math.sqrt((xmm-px)**2+(ymm-py)**2);
+        if(d<bd){bd=d;best=i;}
+    });
+    return best;
+}
+
 function deleteSelected() {
-    if(!selectedItem) return;
-    const {side,type,idx}=selectedItem, a=ann[side];
-    if(type==='switch') a.switches.splice(idx,1);
-    else if(type==='usbc') a.usbc.splice(idx,1);
-    else if(type==='hole') a.holes.splice(idx,1);
-    else if(type==='reset') a.resets.splice(idx,1);
-    else if(type==='outline') a.outline.splice(idx,1);
-    else if(type==='encoder') a.encoder=null;
-    else if(type==='trackpad') a.trackpad=null;
-    selectedItem=null; updateSidebar(); draw(side); updHeaders();
+    if(selection.length===0) return;
+    // Delete in reverse index order to avoid index shifting
+    const grouped={};
+    selection.forEach(s=>{
+        const k=s.side+'_'+s.type;
+        if(!grouped[k]) grouped[k]=[];
+        grouped[k].push(s);
+    });
+    for(const items of Object.values(grouped)){
+        items.sort((a,b)=>b.idx-a.idx);
+        for(const {side,type,idx} of items){
+            const a=ann[side];
+            if(type==='switch') a.switches.splice(idx,1);
+            else if(type==='usbc') a.usbc.splice(idx,1);
+            else if(type==='hole') a.holes.splice(idx,1);
+            else if(type==='reset') a.resets.splice(idx,1);
+            else if(type==='outline') a.outline.splice(idx,1);
+            else if(type==='encoder') a.encoder=null;
+            else if(type==='trackpad') a.trackpad=null;
+            else if(type==='ruler') rulers.splice(idx,1);
+        }
+    }
+    selection=[]; updateSidebar(); draw('left'); draw('right'); updHeaders();
 }
 
 function setupCanvas(side) {
@@ -288,7 +556,7 @@ function setupCanvas(side) {
         const a=ann[side];
         if(mode==='switch') {
             let i=findNearest(side,'switch',xmm,ymm,5);
-            if(i>=0){dragging={side,idx:i,type:'switch'};selectItem(side,'switch',i);}
+            if(i>=0){dragging={side,idx:i,type:'switch',startX:xmm,startY:ymm};selectItem(side,'switch',i,e.shiftKey);}
             else{a.switches.push({x:r1(xmm),y:r1(ymm),rotation:0});selectItem(side,'switch',a.switches.length-1);draw(side);updHeaders();}
         } else if(mode==='usbc') {
             let i=findNearest(side,'usbc',xmm,ymm,5);
@@ -296,7 +564,10 @@ function setupCanvas(side) {
             else{a.usbc.push({x:r1(xmm),y:r1(ymm),w:9,h:3.5,rotation:0});selectItem(side,'usbc',a.usbc.length-1);draw(side);}
         } else if(mode==='hole') {
             let i=findNearest(side,'hole',xmm,ymm,5);
-            if(i>=0){dragging={side,idx:i,type:'hole'};selectItem(side,'hole',i);}
+            if(i>=0){
+                selectItem(side,'hole',i,e.shiftKey);
+                if(!e.shiftKey) dragging={side,idx:i,type:'hole',startX:xmm,startY:ymm};
+            }
             else{a.holes.push({x:r1(xmm),y:r1(ymm),d:HOLE_D});selectItem(side,'hole',a.holes.length-1);draw(side);updHeaders();}
         } else if(mode==='encoder') {
             a.encoder={x:r1(xmm),y:r1(ymm),r:6};
@@ -309,14 +580,71 @@ function setupCanvas(side) {
             if(i>=0){dragging={side,idx:i,type:'reset'};selectItem(side,'reset',i);}
             else{a.resets.push({x:r1(xmm),y:r1(ymm)});selectItem(side,'reset',a.resets.length-1);draw(side);}
         } else if(mode==='outline') {
-            let i=findNearest(side,'outline',xmm,ymm,5);
+            let i=findNearest(side,'outline',xmm,ymm,0.5);
             if(i>=0){dragging={side,idx:i,type:'outline'};selectItem(side,'outline',i);}
+            else {
+                // Find nearest edge — drag it or insert a point (with Alt)
+                const ol=ann[side].outline;
+                let bestEdge=-1, bestDist=10;
+                for(let ei=0;ei<ol.length;ei++){
+                    const [ax,ay]=ol[ei], [bx,by]=ol[(ei+1)%ol.length];
+                    // Distance from point to line segment
+                    const dx=bx-ax, dy=by-ay, len2=dx*dx+dy*dy;
+                    if(len2<0.01) continue;
+                    let t=Math.max(0,Math.min(1,((xmm-ax)*dx+(ymm-ay)*dy)/len2));
+                    const px=ax+t*dx, py=ay+t*dy;
+                    const d=Math.sqrt((xmm-px)**2+(ymm-py)**2);
+                    if(d<bestDist){bestDist=d;bestEdge=ei;}
+                }
+                if(bestEdge>=0){
+                    if(e.altKey) {
+                        // Alt+click: insert new point on edge
+                        ol.splice(bestEdge+1,0,[r1(xmm),r1(ymm)]);
+                        selectItem(side,'outline',bestEdge+1);
+                        dragging={side,idx:bestEdge+1,type:'outline'};
+                    } else {
+                        // Click: drag the edge (moves both endpoints)
+                        dragging={side,idx:bestEdge,type:'edge'};
+                    }
+                    draw(side);
+                }
+            }
+        } else if(mode==='measure') {
+            // First try to select an existing ruler
+            const ri=findNearestRuler(side,xmm,ymm,3);
+            if(ri>=0&&!measureState) {
+                selectItem(side,'ruler',ri);
+                return;
+            }
+            // Get click position — snap to nearest item if close
+            let mx=xmm, my=ymm;
+            for(const t of ['switch','hole','usbc','reset','outline']) {
+                const ni=findNearest(side,t,xmm,ymm,5);
+                if(ni>=0) {
+                    const p=getItemPos({side,type:t,idx:ni});
+                    if(p){mx=p.x;my=p.y;break;}
+                }
+            }
+            if(!measureState) {
+                measureState={side,x:mx,y:my};
+                status('Click second point');
+            } else {
+                if(measureState.side===side) {
+                    rulers.push({side, x1:measureState.x, y1:measureState.y, x2:mx, y2:my});
+                    const d=Math.sqrt((mx-measureState.x)**2+(my-measureState.y)**2);
+                    status('Ruler: '+d.toFixed(1)+'mm');
+                } else {
+                    status('Cannot measure across halves');
+                }
+                measureState=null;
+            }
+            draw(side);
         } else if(mode==='delete') {
             for(const t of ['switch','hole','usbc','reset']) {
                 let i=findNearest(side,t,xmm,ymm,8);
                 if(i>=0){
                     const arr=t==='switch'?a.switches:t==='hole'?a.holes:t==='usbc'?a.usbc:a.resets;
-                    arr.splice(i,1); selectedItem=null; updateSidebar(); draw(side); updHeaders(); return;
+                    arr.splice(i,1); selection=[]; updateSidebar(); draw(side); updHeaders(); return;
                 }
             }
         }
@@ -329,11 +657,40 @@ function setupCanvas(side) {
         const [xmm,ymm]=px2mm(side,px,py);
         const {type,idx}=dragging, a=ann[side];
 
-        if(type==='switch'){a.switches[idx].x=r1(xmm);a.switches[idx].y=r1(ymm);}
+        // Multi-drag: if dragging and multiple items selected, move all
+        if(selection.length>1 && dragging.startX!==undefined) {
+            const dx=xmm-dragging.startX, dy=ymm-dragging.startY;
+            if(Math.abs(dx)>0.05||Math.abs(dy)>0.05) {
+                selection.forEach(s=>{
+                    const sa=ann[s.side];
+                    if(s.type==='hole'){sa.holes[s.idx].x=r1(sa.holes[s.idx].x+dx);sa.holes[s.idx].y=r1(sa.holes[s.idx].y+dy);}
+                    else if(s.type==='switch'){sa.switches[s.idx].x=r1(sa.switches[s.idx].x+dx);sa.switches[s.idx].y=r1(sa.switches[s.idx].y+dy);}
+                    else if(s.type==='outline'){sa.outline[s.idx]=[r1(sa.outline[s.idx][0]+dx),r1(sa.outline[s.idx][1]+dy)];}
+                });
+                dragging.startX=xmm; dragging.startY=ymm;
+            }
+        }
+        else if(type==='switch'){a.switches[idx].x=r1(xmm);a.switches[idx].y=r1(ymm);}
         else if(type==='hole'){a.holes[idx].x=r1(xmm);a.holes[idx].y=r1(ymm);}
         else if(type==='usbc'){a.usbc[idx].x=r1(xmm);a.usbc[idx].y=r1(ymm);}
         else if(type==='reset'){a.resets[idx].x=r1(xmm);a.resets[idx].y=r1(ymm);}
-        else if(type==='outline'){a.outline[idx]=[r1(xmm),r1(ymm)];}
+        else if(type==='outline'){
+            a.outline[idx]=[r1(xmm),r1(ymm)];
+            if(e.shiftKey) snapPointToNeighbors(side,idx);
+        }
+        else if(type==='edge'){
+            // Dragging an edge moves both endpoints
+            const ol=a.outline;
+            const i1=idx, i2=(idx+1)%ol.length;
+            const [ax,ay]=ol[i1], [bx,by]=ol[i2];
+            if(Math.abs(ax-bx)<0.1) {
+                // Vertical edge: move X of both points
+                ol[i1]=[r1(xmm),ay]; ol[i2]=[r1(xmm),by];
+            } else if(Math.abs(ay-by)<0.1) {
+                // Horizontal edge: move Y of both points
+                ol[i1]=[ax,r1(ymm)]; ol[i2]=[bx,r1(ymm)];
+            }
+        }
         else if(type==='trackpad'){a.trackpad.x=r1(xmm);a.trackpad.y=r1(ymm);}
         else if(type==='encoder'){a.encoder.x=r1(xmm);a.encoder.y=r1(ymm);}
         updateSidebar(); draw(side);
@@ -379,6 +736,8 @@ document.addEventListener('keydown', e=>{
     if(k==='p') setMode('trackpad');
     if(k==='r') setMode('reset');
     if(k==='o') setMode('outline');
+    if(k==='n') snapOutline();
+    if(k==='m') startMeasure();
     if(k==='d') setMode('delete');
     if((e.ctrlKey||e.metaKey)&&k==='s'){e.preventDefault();saveData();}
     if(k==='delete'||k==='backspace'){e.preventDefault();deleteSelected();}
@@ -386,12 +745,13 @@ document.addEventListener('keydown', e=>{
 
 // Scroll = rotate selected switch
 document.addEventListener('wheel', e=>{
-    if(!selectedItem||selectedItem.type!=='switch') return;
+    const si=sel0();
+    if(!si||si.type!=='switch') return;
     e.preventDefault();
-    const sw=ann[selectedItem.side].switches[selectedItem.idx];
+    const sw=ann[si.side].switches[si.idx];
     const step=e.shiftKey?0.5:1;
     sw.rotation=r1((sw.rotation||0)+(e.deltaY>0?step:-step));
-    updateSidebar(); draw(selectedItem.side);
+    updateSidebar(); draw(si.side);
 }, {passive:false});
 
 init();
