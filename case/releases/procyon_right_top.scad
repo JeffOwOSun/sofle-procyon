@@ -364,12 +364,30 @@ difference() {
 		}
 		translate(v = [15.5, 69.0, 4.8]) {
 			difference() {
-				linear_extrude(height = 12.5) {
-					offset(r = 2.0) {
-						offset(chamfer = false, delta = -2.0) {
-							offset(chamfer = false, delta = 1.2) {
-								square(center = true, size = [57.2, 80]);
+				union() {
+					linear_extrude(height = 12.1) {
+						offset(r = 2.0) {
+							offset(chamfer = false, delta = -2.0) {
+								offset(chamfer = false, delta = 1.2) {
+									square(center = true, size = [57.2, 80]);
+								}
 							}
+						}
+					}
+					translate(v = [0, 0, 12.1]) {
+						minkowski() {
+							linear_extrude(height = 0.01) {
+								offset(chamfer = false, delta = -0.4) {
+									offset(r = 2.0) {
+										offset(chamfer = false, delta = -2.0) {
+											offset(chamfer = false, delta = 1.2) {
+												square(center = true, size = [57.2, 80]);
+											}
+										}
+									}
+								}
+							}
+							cylinder($fn = 4, h = 0.4, r1 = 0.4, r2 = 0);
 						}
 					}
 				}

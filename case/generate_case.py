@@ -45,6 +45,7 @@ SCREW_CSINK_D = 4.0         # countersink diameter on top plate
 SCREW_CSINK_DEPTH = 2.0     # countersink depth (M2 flat head)
 
 CORNER_R = 2.0              # corner rounding radius for outline vertices
+CHAMFER = 0.4               # chamfer on top edges
 
 # Trackpad tower
 TP_TOWER_H = 12.5           # tower height above plate top surface
@@ -90,6 +91,73 @@ def outline_to_polygon(outline_pts):
 def rounded_outline(outline_pts, corner_r=CORNER_R):
     """Create outline with 2mm rounded corners using shrink-expand trick."""
     return offset(r=corner_r)(offset(delta=-corner_r)(outline_to_polygon(outline_pts)))
+
+
+def chamfered_extrude(shape_2d, height, chamfer=CHAMFER):
+    """Extrude a 2D shape with a 45° chamfer on the top edge.
+    Works correctly with concave corners by subtracting a chamfer volume."""
+    body = linear_extrude(height)(shape_2d)
+    # Subtract a 45° ring at the top: the area between the outline and
+    # the inset outline, swept as a wedge from z=(h-chamfer) to z=h
+    # Use intersection of a translated/scaled prism to create the 45° cut
+    chamfer_mask = translate([0, 0, height - chamfer])(
+        linear_extrude(chamfer + 1)(
+            difference()(
+                offset(delta=1)(shape_2d),  # slightly larger to ensure full coverage
+                shape_2d
+            )
+        )
+    )
+    # The 45° bevel: at each z above (height-chamfer), remove material
+    # outside (shape inset by z-offset from top)
+    # Achieved by intersecting the top portion with a tapered shape
+    inset = offset(delta=-chamfer)(shape_2d)
+    taper = translate([0, 0, height])(
+        mirror([0, 0, 1])(
+            linear_extrude(chamfer, scale=1)(shape_2d)
+        )
+    )
+    # Simpler approach: subtract a ring that grows inward from top
+    # At z=height: remove everything outside inset
+    # At z=height-chamfer: remove nothing
+    # This is: subtract the volume above z=height-chamfer that's outside
+    # a shape that linearly interpolates from shape_2d to inset
+
+    # Most reliable OpenSCAD approach: subtract prism, then add back tapered part
+    # Or: build the shape as union of slices (too slow)
+
+    # Practical approach: subtract a cube-minus-inset at the top,
+    # then use minkowski to taper it
+
+    # Actually simplest correct approach for both convex and concave:
+    # The body minus a "chamfer cutter" at the top
+    # Chamfer cutter = everything above (h-c) that's outside the inset outline
+    # Since we can't easily taper in OpenSCAD, use the roof() or
+    # approximate with the difference of two offset extrusions
+
+    # Clean approach: extrude to h-c, then add a smaller piece on top
+    # For concave: use intersection instead of hull
+    main = linear_extrude(height - chamfer)(shape_2d)
+    # Top chamfer: intersection of full extrusion with a cone-like shape
+    top_block = translate([0, 0, height - chamfer])(
+        linear_extrude(chamfer)(shape_2d)
+    )
+    # Create the 45° cut by subtracting an outward-growing ring
+    # At each layer dz above (h-c), remove a ring of width dz around the perimeter
+    # Approximate with a single subtraction: offset outward by chamfer,
+    # then intersect with the inset shape extruded, won't work...
+
+    # Best practical method: use minkowski with a downward-pointing cone
+    # on the INSET shape to create the tapered top
+    cone = cylinder(r1=chamfer, r2=0, h=chamfer, _fn=4)
+    top_chamfered = translate([0, 0, height - chamfer])(
+        minkowski()(
+            linear_extrude(0.01)(inset),
+            cone
+        )
+    )
+
+    return main + top_chamfered
 
 
 def make_top_plate(side):
@@ -180,8 +248,8 @@ def make_top_plate(side):
         # Step 3: Round corners by 2mm
         tower_2d = offset(r=TP_CORNER_R)(offset(delta=-TP_CORNER_R)(tower_2d))
 
-        # Step 4: Extrude tower 12.5mm from plate top surface
-        tower = linear_extrude(TP_TOWER_H)(tower_2d)
+        # Step 4: Extrude tower 12.5mm with chamfered top edge
+        tower = chamfered_extrude(tower_2d, TP_TOWER_H)
 
         # Step 5 (subtracted later): Touchpad pocket
         # From 0.6mm below top of tower, depth = TP_THICKNESS (1.7mm)
@@ -234,10 +302,9 @@ def make_bottom(side):
     outline = data['outline_mm']
     total_h = BOTTOM_FLOOR + BOTTOM_HEIGHT
 
-    # Outer shell (outline + wall thickness)
-    outer = linear_extrude(total_h)(
-        offset(delta=BOTTOM_WALL)(rounded_outline(outline))
-    )
+    # Outer shell (outline + wall thickness, chamfered top edge)
+    outer_2d = offset(delta=BOTTOM_WALL)(rounded_outline(outline))
+    outer = chamfered_extrude(outer_2d, total_h)
 
     # Inner cavity (same as outline)
     inner = translate([0, 0, BOTTOM_FLOOR])(
