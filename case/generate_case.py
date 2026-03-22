@@ -36,24 +36,24 @@ CLIP_HEIGHT = 3.8           # height of notch (from bottom of plate)
 
 BOTTOM_WALL = 2.0           # bottom case wall thickness
 BOTTOM_FLOOR = 2.0          # floor thickness
-BOTTOM_HEIGHT = 8.0         # internal height
+BOTTOM_HEIGHT = 10.5        # internal height (7.5mm plate-to-PCB gap + 3mm standoff)
 PCB_STANDOFF_H = 3.0        # PCB sits this high
 STANDOFF_OD = 5.0           # standoff outer diameter
-SCREW_D = 2.25              # through-hole diameter (matches PCB holes)
+SCREW_D_THROUGH = 2.25      # through-hole diameter (plate, matches PCB holes)
+SCREW_D_TAP = 1.6           # tap hole diameter for M2 friction fit (in standoffs)
+SCREW_CSINK_D = 4.0         # countersink diameter on top plate
+SCREW_CSINK_DEPTH = 2.0     # countersink depth (M2 flat head)
 
-OUTLINE_EXPAND = 1.5        # how much to expand outline for case walls
-CORNER_R = 1.5              # corner rounding radius
+CORNER_R = 2.0              # corner rounding radius for outline vertices
 
-TP_CLEARANCE = 0.5          # trackpad cutout clearance per side (only used if no tower)
-
-# Trackpad tower (print-in-place design)
-TP_KEY_HEIGHT = 12.5        # key top height above plate surface
-TP_THICKNESS = 1.65         # touchpad PCB thickness
-TP_FILM = 0.4              # top film layer (pause print before this to insert pad)
-TP_WALL = 0.4              # side wall thickness around touchpad
-TP_CABLE_EDGE = 5.0        # support edge around cable cutout
-TP_TOWER_H = TP_KEY_HEIGHT  # 12.5mm total (from plate top to key top)
-TP_PLATFORM_H = TP_TOWER_H - TP_FILM - TP_THICKNESS  # 10.45mm
+# Trackpad tower
+TP_TOWER_H = 12.5           # tower height above plate top surface
+TP_EXPAND = 1.2             # tower larger than touchpad on each side
+TP_CORNER_R = 2.0           # tower corner rounding
+TP_THICKNESS = 1.7          # touchpad PCB thickness
+TP_LIP = 0.6               # lip depth from top (touchpad sits this far below tower top)
+TP_CABLE_SHRINK_X = 15.0     # cable cutout shrink from touchpad edge (left/right)
+TP_CABLE_SHRINK_Y = 22.0     # cable cutout shrink from touchpad edge (top/bottom)
 
 USB_CUTOUT_W = 9.0          # USB-C port cutout width (along port direction)
 USB_CUTOUT_H = 0.5          # USB-C port cutout height (tiny protrusion above PCB)
@@ -66,7 +66,7 @@ def flip_y(data):
     flipped = dict(data)
     flipped['outline_mm'] = [(x, h - y) for x, y in data['outline_mm']]
     flipped['switches'] = [{'x': s['x'], 'y': round(h - s['y'], 2), 'rotation': -s.get('rotation', 0)} for s in data['switches']]
-    flipped['holes'] = [{'x': ho['x'], 'y': round(h - ho['y'], 2), 'd': ho.get('d', SCREW_D)} for ho in data.get('holes', [])]
+    flipped['holes'] = [{'x': ho['x'], 'y': round(h - ho['y'], 2), 'd': ho.get('d', SCREW_D_THROUGH)} for ho in data.get('holes', [])]
     flipped['usbc'] = [{'x': u['x'], 'y': round(h - u['y'], 2), 'w': u.get('w', 9), 'h': u.get('h', 3.5), 'rotation': u.get('rotation', 0)} for u in data.get('usbc', [])]
     flipped['resets'] = [{'x': r['x'], 'y': round(h - r['y'], 2)} for r in data.get('resets', [])]
     if data.get('encoder'):
@@ -88,24 +88,22 @@ def outline_to_polygon(outline_pts):
 
 
 def rounded_outline(outline_pts, corner_r=CORNER_R):
-    """Create outline with rounded corners."""
+    """Create outline with 2mm rounded corners using shrink-expand trick."""
     return offset(r=corner_r)(offset(delta=-corner_r)(outline_to_polygon(outline_pts)))
 
 
-def expanded_outline(outline_pts, expand):
-    """Create an expanded version of the outline with rounded corners."""
-    return offset(r=expand)(rounded_outline(outline_pts))
-
-
 def make_top_plate(side):
-    """Generate a top plate with switch cutouts."""
+    """Generate a top plate with switch cutouts.
+    Flow: 1. contour -> 2. round 2mm -> 3. extrude 4.8mm -> 4. punch holes
+          5. blind USB-C -> 6. blind clip notches -> 7. blind encoder side notches
+    """
     data = flip_y(D[side])
-    outline = data.get('constructed_outline', data['outline_mm'])
+    outline = data['outline_mm']
     switches = data['switches']
 
-    # Base plate from PCB outline
+    # Step 1-3: Create contour, round corners, extrude
     plate = linear_extrude(PLATE_THICKNESS)(
-        expanded_outline(outline, OUTLINE_EXPAND)
+        rounded_outline(outline)
     )
 
     # Cut switch holes with clip notches
@@ -130,10 +128,15 @@ def make_top_plate(side):
         switch_cut = translate([sw['x'], sw['y'], PLATE_THICKNESS / 2])(switch_cut)
         plate -= switch_cut
 
-    # Cut mounting holes through plate
+    # Cut mounting holes through plate with countersink
     for h in data.get('holes', []):
+        # Through hole
         plate -= translate([h['x'], h['y'], -1])(
-            cylinder(d=SCREW_D, h=PLATE_THICKNESS + 2, _fn=16)
+            cylinder(d=SCREW_D_THROUGH, h=PLATE_THICKNESS + 2, _fn=16)
+        )
+        # Countersink from top
+        plate -= translate([h['x'], h['y'], PLATE_THICKNESS - SCREW_CSINK_DEPTH])(
+            cylinder(d=SCREW_CSINK_D, h=SCREW_CSINK_DEPTH + 1, _fn=24)
         )
 
     # Cut encoder hole (same as switch cutout + side notches)
@@ -165,41 +168,51 @@ def make_top_plate(side):
     # Trackpad tower (print-in-place, right half)
     if data.get('trackpad'):
         tp = data['trackpad']
-        tp_w = tp['w']  # 57.2
-        tp_h = tp['h']  # 80.0
-        outer_w = tp_w + 2 * TP_WALL
-        outer_h = tp_h + 2 * TP_WALL
-        cable_w = tp_w - 2 * TP_CABLE_EDGE
-        cable_h = tp_h - 2 * TP_CABLE_EDGE
+        tp_w = tp['w']   # 57.2
+        tp_h = tp['h']   # 80.0
 
-        # Tower sits on top of plate surface (z=PLATE_THICKNESS)
-        # Top edge of tower at y=108 (aligned with top plate edge)
-        tower_top_y = 108.0
-        tower_y = tower_top_y - outer_h / 2
+        # Step 1: Touchpad contour (rectangle)
+        tp_rect = square([tp_w, tp_h], center=True)
 
-        # Layer 1: Platform (with cable cutout in center)
-        platform = cube([outer_w, outer_h, TP_PLATFORM_H], center=True)
-        cable_cut = cube([cable_w, cable_h, TP_PLATFORM_H + 2], center=True)
-        platform -= cable_cut
-        platform = translate([0, 0, TP_PLATFORM_H / 2])(platform)
+        # Step 2: Expand by 1.2mm on all sides
+        tower_2d = offset(delta=TP_EXPAND)(tp_rect)
 
-        # Layer 2: Touchpad pocket walls (0.4mm walls around the pad)
-        pocket_outer = cube([outer_w, outer_h, TP_THICKNESS], center=True)
-        pocket_inner = cube([tp_w, tp_h, TP_THICKNESS + 2], center=True)
-        pocket_walls = pocket_outer - pocket_inner
-        pocket_walls = translate([0, 0, TP_PLATFORM_H + TP_THICKNESS / 2])(pocket_walls)
+        # Step 3: Round corners by 2mm
+        tower_2d = offset(r=TP_CORNER_R)(offset(delta=-TP_CORNER_R)(tower_2d))
 
-        # Layer 3: Film on top (0.4mm solid lid, pause before this to insert pad)
-        film = cube([outer_w, outer_h, TP_FILM], center=True)
-        film = translate([0, 0, TP_PLATFORM_H + TP_THICKNESS + TP_FILM / 2])(film)
+        # Step 4: Extrude tower 12.5mm from plate top surface
+        tower = linear_extrude(TP_TOWER_H)(tower_2d)
 
-        # Combine tower, position on plate top surface, Y-aligned to top edge
-        tower = platform + pocket_walls + film
-        tower = translate([tp['x'], tower_y, PLATE_THICKNESS])(tower)
-        plate += tower
+        # Step 5 (subtracted later): Touchpad pocket
+        # From 0.6mm below top of tower, depth = TP_THICKNESS (1.7mm)
+        # So pocket starts at z = TP_TOWER_H - TP_LIP - TP_THICKNESS
+        pocket_z = TP_TOWER_H - TP_LIP - TP_THICKNESS
+        pocket = translate([0, 0, pocket_z])(
+            linear_extrude(TP_THICKNESS + 0.01)(tp_rect)
+        )
+
+        # Step 6: Cable cutout — shrink touchpad contour asymmetrically, through-cut from pocket bottom to tower bottom
+        cable_w = tp_w - 2 * TP_CABLE_SHRINK_X
+        cable_h = tp_h - 2 * TP_CABLE_SHRINK_Y
+        cable_2d = square([cable_w, cable_h], center=True)
+        cable = translate([0, 0, -1])(
+            linear_extrude(pocket_z + 1.01)(cable_2d)
+        )
+
+        # Combine: tower - pocket - cable
+        tower_assembly = tower - pocket - cable
+
+        # Position: top edge of tower at y=108 (aligned with top plate edge)
+        tower_outer_h = tp_h + 2 * TP_EXPAND
+        tower_top_y = 109.0 + TP_EXPAND
+        tower_y = tower_top_y - tower_outer_h / 2
+        tower_x = tp['x'] - TP_EXPAND
+
+        tower_assembly = translate([tower_x, tower_y, PLATE_THICKNESS])(tower_assembly)
+        plate += tower_assembly
 
         # Cut cable routing hole through the plate under the tower
-        plate -= translate([tp['x'], tower_y, PLATE_THICKNESS / 2])(
+        plate -= translate([tower_x, tower_y, PLATE_THICKNESS / 2])(
             cube([cable_w, cable_h, PLATE_THICKNESS + 2], center=True)
         )
 
@@ -218,18 +231,18 @@ def make_top_plate(side):
 def make_bottom(side):
     """Generate a bottom case with walls and PCB standoffs."""
     data = flip_y(D[side])
-    outline = data.get('constructed_outline', data['outline_mm'])
+    outline = data['outline_mm']
     total_h = BOTTOM_FLOOR + BOTTOM_HEIGHT
 
-    # Outer shell
+    # Outer shell (outline + wall thickness)
     outer = linear_extrude(total_h)(
-        expanded_outline(outline, OUTLINE_EXPAND + BOTTOM_WALL)
+        offset(delta=BOTTOM_WALL)(rounded_outline(outline))
     )
 
-    # Inner cavity
+    # Inner cavity (same as outline)
     inner = translate([0, 0, BOTTOM_FLOOR])(
         linear_extrude(BOTTOM_HEIGHT + 1)(
-            expanded_outline(outline, OUTLINE_EXPAND)
+            rounded_outline(outline)
         )
     )
 
@@ -241,21 +254,36 @@ def make_bottom(side):
         post = translate([h['x'], h['y'], BOTTOM_FLOOR])(
             cylinder(d=STANDOFF_OD, h=PCB_STANDOFF_H, _fn=24)
         )
-        # Screw hole through floor + standoff
+        # Screw hole through standoff (tap diameter for M2 friction fit)
         hole = translate([h['x'], h['y'], -1])(
-            cylinder(d=SCREW_D, h=BOTTOM_FLOOR + PCB_STANDOFF_H + 2, _fn=16)
+            cylinder(d=SCREW_D_TAP, h=BOTTOM_FLOOR + PCB_STANDOFF_H + 2, _fn=16)
         )
         shell = shell + post - hole
 
-    # USB-C cutouts through the wall
+    # Reset switch cutouts through the floor
+    total_h = BOTTOM_FLOOR + BOTTOM_HEIGHT
+    for rst in data.get('resets', []):
+        shell -= translate([rst['x'] - 2, rst['y'] - 1.5, -1])(
+            cube([4, 3, total_h + 2])
+        )
+
+    # USB-C cutouts through the walls
+    BOTTOM_USB_W = 12.0     # cutout width
+    BOTTOM_USB_H = 6.0      # cutout height (fits within wall above floor)
+    z_center = BOTTOM_FLOOR + PCB_STANDOFF_H  # center at standoff height from top
+    wall_depth = BOTTOM_WALL * 4  # enough to cut through wall
     for port in data.get('usbc', []):
-        pw, ph = USB_CUTOUT_W, USB_CUTOUT_H
-        z_center = BOTTOM_FLOOR + PCB_STANDOFF_H + 1  # roughly at PCB level
-        usb_cut = cube([pw, ph, ph], center=True)
-        if port.get('rotation', 0):
-            usb_cut = rotate([0, 0, port['rotation']])(usb_cut)
-        usb_cut = translate([port['x'], port['y'], z_center])(usb_cut)
-        # Make it cut through the wall by extending it outward
+        rot = port.get('rotation', 0)
+        if rot == 0:
+            # Top USB-C: cutout in x-z plane, extruded along y
+            usb_cut = translate([port['x'], port['y'], z_center])(
+                cube([BOTTOM_USB_W, wall_depth, BOTTOM_USB_H], center=True)
+            )
+        else:
+            # Side USB-C: cutout in y-z plane, extruded along x
+            usb_cut = translate([port['x'], port['y'], z_center])(
+                cube([wall_depth, BOTTOM_USB_W, BOTTOM_USB_H], center=True)
+            )
         shell -= usb_cut
 
     return shell
