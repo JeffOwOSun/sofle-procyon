@@ -16,6 +16,8 @@ Usage:
 from solid2 import *
 import json, os
 
+set_global_fn(64)
+
 # Load PCB data
 with open(os.path.join(os.path.dirname(__file__), 'pcb_data.json')) as f:
     D = json.load(f)
@@ -58,7 +60,7 @@ TP_CABLE_SHRINK_Y = 22.0     # cable cutout shrink from touchpad edge (top/botto
 
 USB_CUTOUT_W = 9.0          # USB-C port cutout width (along port direction)
 USB_CUTOUT_H = 0.5          # USB-C port cutout height (tiny protrusion above PCB)
-USB_CUTOUT_D = 6.5          # USB-C port cutout depth (into the plate from bottom)
+USB_CUTOUT_D = 9.0          # USB-C port cutout depth (into the plate from bottom)
 
 
 def flip_y(data):
@@ -90,7 +92,7 @@ def outline_to_polygon(outline_pts):
 
 def rounded_outline(outline_pts, corner_r=CORNER_R):
     """Create outline with 2mm rounded corners using shrink-expand trick."""
-    return offset(r=corner_r)(offset(delta=-corner_r)(outline_to_polygon(outline_pts)))
+    return offset(r=corner_r, _fn=64)(offset(delta=-corner_r)(outline_to_polygon(outline_pts)))
 
 
 def chamfered_extrude(shape_2d, height, chamfer=CHAMFER):
@@ -149,7 +151,7 @@ def chamfered_extrude(shape_2d, height, chamfer=CHAMFER):
 
     # Best practical method: use minkowski with a downward-pointing cone
     # on the INSET shape to create the tapered top
-    cone = cylinder(r1=chamfer, r2=0, h=chamfer, _fn=4)
+    cone = cylinder(r1=chamfer, r2=0, h=chamfer, _fn=32)
     top_chamfered = translate([0, 0, height - chamfer])(
         minkowski()(
             linear_extrude(0.01)(inset),
@@ -207,28 +209,28 @@ def make_top_plate(side):
             cylinder(d=SCREW_CSINK_D, h=SCREW_CSINK_DEPTH + 1, _fn=24)
         )
 
-    # Cut encoder hole (same as switch cutout + side notches)
+    # Cut encoder hole (12.5mm square + side notches)
+    ENC_CUTOUT = 12.5
     if data.get('encoder'):
         enc = data['encoder']
-        # Main 14mm square through-hole
-        enc_cut = cube([SWITCH_CUTOUT, SWITCH_CUTOUT, PLATE_THICKNESS + 2], center=True)
+        # Main 12.5mm square through-hole
+        enc_cut = cube([ENC_CUTOUT, ENC_CUTOUT, PLATE_THICKNESS + 2], center=True)
 
-        # Top/bottom clip notches (same as switch)
-        notch_y_offset = SWITCH_CUTOUT / 2 + CLIP_DEPTH / 2
-        notch = cube([CLIP_WIDTH, CLIP_DEPTH, CLIP_HEIGHT], center=True)
-        notch_z = -PLATE_THICKNESS / 2 + CLIP_HEIGHT / 2
-        enc_cut += translate([0, notch_y_offset, notch_z])(notch)
-        enc_cut += translate([0, -notch_y_offset, notch_z])(notch)
-
-        # Left/right side notches: 7mm wide, 2mm deep, 2.5mm height from bottom
-        ENC_SIDE_W = 7.0
-        ENC_SIDE_DEPTH = 2.0
-        ENC_SIDE_H = 2.5
-        side_notch = cube([ENC_SIDE_DEPTH, ENC_SIDE_W, ENC_SIDE_H], center=True)
-        side_x_offset = SWITCH_CUTOUT / 2 + ENC_SIDE_DEPTH / 2
-        side_z = -PLATE_THICKNESS / 2 + ENC_SIDE_H / 2
-        enc_cut += translate([side_x_offset, 0, side_z])(side_notch)
-        enc_cut += translate([-side_x_offset, 0, side_z])(side_notch)
+        # 4 individual blind notches on each side (same width as cutout)
+        # This leaves solid corners for the printer to bridge across
+        ENC_NOTCH_D = 2.0    # depth beyond cutout edge
+        ENC_NOTCH_H = 3.8    # height from bottom
+        notch_z = -PLATE_THICKNESS / 2 + ENC_NOTCH_H / 2
+        # Top and bottom notches: 12.5mm wide x 2mm deep
+        tb_notch = cube([ENC_CUTOUT, ENC_NOTCH_D, ENC_NOTCH_H], center=True)
+        tb_offset = ENC_CUTOUT / 2 + ENC_NOTCH_D / 2
+        enc_cut += translate([0, tb_offset, notch_z])(tb_notch)
+        enc_cut += translate([0, -tb_offset, notch_z])(tb_notch)
+        # Left and right notches: 2mm deep x 12.5mm wide
+        lr_notch = cube([ENC_NOTCH_D, ENC_CUTOUT, ENC_NOTCH_H], center=True)
+        lr_offset = ENC_CUTOUT / 2 + ENC_NOTCH_D / 2
+        enc_cut += translate([lr_offset, 0, notch_z])(lr_notch)
+        enc_cut += translate([-lr_offset, 0, notch_z])(lr_notch)
 
         enc_cut = translate([enc['x'], enc['y'], PLATE_THICKNESS / 2])(enc_cut)
         plate -= enc_cut
@@ -284,6 +286,26 @@ def make_top_plate(side):
             cube([cable_w, cable_h, PLATE_THICKNESS + 2], center=True)
         )
 
+        # Breakaway support for the overhanging part of the tower
+        # The tower extends beyond the plate outline on the split side.
+        # Support fills the gap under the overhang with:
+        #   0.2mm vertical gap (easy to snap off after printing)
+        #   0.4mm horizontal gap (no fusion with plate)
+        SUPPORT_V_GAP = 0.2   # vertical gap below plate
+        SUPPORT_H_GAP = 0.4   # horizontal gap from plate edge
+        support_h = PLATE_THICKNESS - SUPPORT_V_GAP  # 4.6mm tall
+
+        # Support 2D = tower footprint (shrunk by h_gap) minus plate outline (expanded by h_gap)
+        # This ensures the support doesn't touch the plate on any side
+        tower_2d_shrunk = offset(delta=-SUPPORT_H_GAP)(tower_2d)
+        plate_expanded = offset(delta=SUPPORT_H_GAP)(rounded_outline(outline))
+        support_2d = difference()(
+            translate([tower_x, tower_y])(tower_2d_shrunk),
+            plate_expanded
+        )
+        support = linear_extrude(support_h)(support_2d)
+        plate += support
+
     # Cut USB-C port recesses (blind cut from bottom, not through)
     for port in data.get('usbc', []):
         usb_cut = cube([USB_CUTOUT_W, USB_CUTOUT_D, USB_CUTOUT_H], center=True)
@@ -302,14 +324,16 @@ def make_bottom(side):
     outline = data['outline_mm']
     total_h = BOTTOM_FLOOR + BOTTOM_HEIGHT
 
-    # Outer shell (outline + wall thickness, chamfered top edge)
-    outer_2d = offset(delta=BOTTOM_WALL)(rounded_outline(outline))
+    # Outer shell (outline + clearance + wall thickness, chamfered top edge)
+    PCB_CLEARANCE = 0.6
+    outer_2d = offset(delta=PCB_CLEARANCE + BOTTOM_WALL)(rounded_outline(outline))
     outer = chamfered_extrude(outer_2d, total_h)
 
-    # Inner cavity (same as outline)
+    # Inner cavity (outline + 0.6mm clearance for PCB fit)
+    PCB_CLEARANCE = 0.6
     inner = translate([0, 0, BOTTOM_FLOOR])(
         linear_extrude(BOTTOM_HEIGHT + 1)(
-            rounded_outline(outline)
+            offset(delta=PCB_CLEARANCE)(rounded_outline(outline))
         )
     )
 
@@ -338,7 +362,7 @@ def make_bottom(side):
     BOTTOM_USB_W = 12.0     # cutout width
     BOTTOM_USB_H = 6.0      # cutout height (fits within wall above floor)
     z_center = BOTTOM_FLOOR + PCB_STANDOFF_H  # center at standoff height from top
-    wall_depth = BOTTOM_WALL * 4  # enough to cut through wall
+    wall_depth = 20  # generous depth to ensure cut goes through wall
     for port in data.get('usbc', []):
         rot = port.get('rotation', 0)
         if rot == 0:

@@ -1,6 +1,8 @@
+$fn = 64;
+
 difference() {
 	linear_extrude(height = 4.8) {
-		offset(r = 2.0) {
+		offset($fn = 64, r = 2.0) {
 			offset(chamfer = false, delta = -2.0) {
 				polygon(points = [[-0.4, 100.6887], [-0.4, 24.688699999999997], [37.6, 24.688699999999997], [37.6, 14.588700000000003], [93.5, 14.588700000000003], [130.1, -0.9112999999999971], [139.6, 15.588700000000003], [139.6, 107.0887], [94.6, 107.0887], [94.6, 109.5887], [75.6, 109.5887], [75.6, 112.0887], [56.6, 112.0887], [56.6, 109.5887], [37.6, 109.5887], [37.6, 100.6887]]);
 			}
@@ -359,29 +361,29 @@ difference() {
 	translate(v = [120.7, 26.79, 2.8]) {
 		cylinder($fn = 24, d = 4.0, h = 3.0);
 	}
-	translate(v = [126, 40.79, 2.4]) {
+	translate(v = [125.2, 40.99, 2.4]) {
 		union() {
-			cube(center = true, size = [14.0, 14.0, 6.8]);
-			translate(v = [0, 7.5, -0.5]) {
-				cube(center = true, size = [5.0, 1.0, 3.8]);
+			cube(center = true, size = [12.5, 12.5, 6.8]);
+			translate(v = [0, 7.25, -0.5]) {
+				cube(center = true, size = [12.5, 2.0, 3.8]);
 			}
-			translate(v = [0, -7.5, -0.5]) {
-				cube(center = true, size = [5.0, 1.0, 3.8]);
+			translate(v = [0, -7.25, -0.5]) {
+				cube(center = true, size = [12.5, 2.0, 3.8]);
 			}
-			translate(v = [8.0, 0, -1.15]) {
-				cube(center = true, size = [2.0, 7.0, 2.5]);
+			translate(v = [7.25, 0, -0.5]) {
+				cube(center = true, size = [2.0, 12.5, 3.8]);
 			}
-			translate(v = [-8.0, 0, -1.15]) {
-				cube(center = true, size = [2.0, 7.0, 2.5]);
+			translate(v = [-7.25, 0, -0.5]) {
+				cube(center = true, size = [2.0, 12.5, 3.8]);
 			}
 		}
 	}
 	translate(v = [125.7, 105.19, 0.25]) {
-		cube(center = true, size = [9.0, 6.5, 0.5]);
+		cube(center = true, size = [9.0, 9.0, 0.5]);
 	}
 	translate(v = [137.7, 29.99, 0.25]) {
 		rotate(a = [0, 0, 90]) {
-			cube(center = true, size = [9.0, 6.5, 0.5]);
+			cube(center = true, size = [9.0, 9.0, 0.5]);
 		}
 	}
 }
