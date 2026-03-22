@@ -130,12 +130,24 @@ function draw(side) {
             for(let ci=1;ci<a.constructed_outline.length;ci++) { let [cpx,cpy]=mm2px(side,a.constructed_outline[ci][0],a.constructed_outline[ci][1]); ctx.lineTo(cpx,cpy); }
             ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
         }
-        if(mode==='outline') a.outline.forEach((pt,i)=>{
+        // Always show outline point numbers and dots
+        a.outline.forEach((pt,i)=>{
             let [px,py]=mm2px(side,pt[0],pt[1]);
             let sel=selection.some(s=>s.side===side&&s.type==='outline'&&s.idx===i);
             ctx.fillStyle=sel?'#ffff00':'#00ff00';
             ctx.beginPath(); ctx.arc(px,py,sel?6:4,0,Math.PI*2); ctx.fill();
+            ctx.font='14px monospace'; ctx.fontWeight='bold';
+            ctx.fillText(i,px+8,py-6);
         });
+        // Label edges with numbers at midpoints
+        for(let i=0;i<a.outline.length;i++){
+            const [x1,y1]=a.outline[i], [x2,y2]=a.outline[(i+1)%a.outline.length];
+            const [px1,py1]=mm2px(side,x1,y1), [px2,py2]=mm2px(side,x2,y2);
+            const mx=(px1+px2)/2, my=(py1+py2)/2;
+            const len=Math.sqrt((x2-x1)**2+(y2-y1)**2);
+            ctx.fillStyle='rgba(0,255,0,0.7)'; ctx.font='bold 13px monospace';
+            ctx.fillText('e'+i+' '+len.toFixed(1),mx+6,my-3);
+        }
     }
 
     // Switches with crosshairs and labels
