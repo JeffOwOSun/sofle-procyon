@@ -12,7 +12,7 @@ difference() {
 									union() {
 										difference() {
 											union() {
-												linear_extrude(height = 12.1) {
+												linear_extrude(height = 11.1) {
 													offset(chamfer = false, delta = 2.6) {
 														offset($fn = 64, r = 2.0) {
 															offset(chamfer = false, delta = -2.0) {
@@ -21,7 +21,7 @@ difference() {
 														}
 													}
 												}
-												translate(v = [0, 0, 12.1]) {
+												translate(v = [0, 0, 11.1]) {
 													minkowski() {
 														linear_extrude(height = 0.01) {
 															offset(chamfer = false, delta = -0.4) {
@@ -39,7 +39,7 @@ difference() {
 												}
 											}
 											translate(v = [0, 0, 2.0]) {
-												linear_extrude(height = 11.5) {
+												linear_extrude(height = 10.5) {
 													offset(chamfer = false, delta = 0.6) {
 														offset($fn = 64, r = 2.0) {
 															offset(chamfer = false, delta = -2.0) {
@@ -90,15 +90,15 @@ difference() {
 		cylinder($fn = 16, d = 1.6, h = 7.0);
 	}
 	translate(v = [134.4, 45.19, -1]) {
-		cube(size = [4, 3, 14.5]);
+		cube(size = [4, 3, 13.5]);
 	}
 	translate(v = [134.4, 39.29, -1]) {
-		cube(size = [4, 3, 14.5]);
+		cube(size = [4, 3, 13.5]);
 	}
-	translate(v = [125.7, 105.19, 5.0]) {
-		cube(center = true, size = [12.0, 20, 6.0]);
+	translate(v = [125.7, 105.19, 5.75]) {
+		cube(center = true, size = [14.0, 20, 8.0]);
 	}
-	translate(v = [137.7, 29.99, 5.0]) {
-		cube(center = true, size = [20, 12.0, 6.0]);
+	translate(v = [137.7, 29.99, 5.75]) {
+		cube(center = true, size = [20, 14.0, 8.0]);
 	}
 }

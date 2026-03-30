@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Mouse Event Tester</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a1a; color: #eee; font-family: monospace; display: flex; flex-direction: column; height: 100vh; }
+.target { flex: 1; display: flex; align-items: center; justify-content: center; cursor: crosshair; user-select: none; }
+.target:active { background: #222; }
+.info { font-size: 14px; color: #666; }
+.log-wrap { height: 40vh; overflow-y: auto; border-top: 1px solid #333; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { background: #333; padding: 4px 8px; text-align: left; position: sticky; top: 0; }
+td { padding: 3px 8px; border-bottom: 1px solid #222; }
+.down { color: #ff4444; }
+.up { color: #44ff44; }
+.move { color: #666; }
+.wheel { color: #44aaff; }
+.click { color: #ffaa00; }
+.toolbar { background: #333; padding: 6px 16px; display: flex; gap: 12px; align-items: center; }
+.toolbar button { padding: 4px 12px; background: #444; border: 1px solid #666; color: #eee; cursor: pointer; font-family: monospace; }
+.buttons-display { font-size: 24px; display: flex; gap: 20px; }
+.btn-indicator { padding: 10px 20px; border: 2px solid #444; border-radius: 4px; }
+.btn-indicator.active { border-color: #ff4444; background: #441111; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+    <button onclick="clearLog()">Clear</button>
+    <button onclick="saveLog()">Save Log</button>
+    <span>Move logging: <button id="move-toggle" onclick="toggleMove()">OFF</button></span>
+    <span style="color:#888">Events: <span id="count">0</span></span>
+</div>
+<div class="target" id="target">
+    <div style="text-align:center">
+        <div class="buttons-display">
+            <div class="btn-indicator" id="btn-left">LEFT</div>
+            <div class="btn-indicator" id="btn-middle">MID</div>
+            <div class="btn-indicator" id="btn-right">RIGHT</div>
+        </div>
+        <br>
+        <div class="info">Click, scroll, or drag here</div>
+        <div id="pos" style="color:#555; margin-top:8px">x: 0, y: 0</div>
+    </div>
+</div>
+<div class="log-wrap">
+    <table>
+        <thead><tr><th>Time</th><th>dt (ms)</th><th>Event</th><th>Button</th><th>Buttons</th><th>Details</th></tr></thead>
+        <tbody id="log"></tbody>
+    </table>
+</div>
+
+<script>
+const target = document.getElementById('target');
+const log = document.getElementById('log');
+const countEl = document.getElementById('count');
+let eventCount = 0;
+let lastTime = 0;
+let logMove = false;
+
+const btnNames = ['LEFT', 'RIGHT', 'MIDDLE', 'BACK', 'FORWARD'];
+
+function buttonName(b) { return btnNames[b] || 'BTN'+b; }
+function buttonsStr(buttons) {
+    const parts = [];
+    for (let i = 0; i < 5; i++) if (buttons & (1 << i)) parts.push(btnNames[i]);
+    return parts.join('+') || 'none';
+}
+
+function addRow(type, cls, button, buttons, detail) {
+    const now = performance.now();
+    const dt = lastTime ? (now - lastTime).toFixed(1) : '-';
+    lastTime = now;
+    const time = new Date().toISOString().substr(11, 12);
+    logData.push([time, dt, type, button, buttonsStr(buttons), detail]);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${time}</td><td>${dt}</td><td class="${cls}">${type}</td><td>${button}</td><td>${buttonsStr(buttons)}</td><td>${detail}</td>`;
+    log.prepend(tr);
+    eventCount++;
+    countEl.textContent = eventCount;
+}
+
+function updateButtons(buttons) {
+    document.getElementById('btn-left').classList.toggle('active', buttons & 1);
+    document.getElementById('btn-right').classList.toggle('active', buttons & 2);
+    document.getElementById('btn-middle').classList.toggle('active', buttons & 4);
+}
+
+target.addEventListener('mousedown', e => {
+    e.preventDefault();
+    updateButtons(e.buttons);
+    addRow('mousedown', 'down', buttonName(e.button), e.buttons, `x:${e.offsetX} y:${e.offsetY}`);
+});
+
+target.addEventListener('mouseup', e => {
+    e.preventDefault();
+    updateButtons(e.buttons);
+    addRow('mouseup', 'up', buttonName(e.button), e.buttons, `x:${e.offsetX} y:${e.offsetY}`);
+});
+
+target.addEventListener('click', e => {
+    addRow('click', 'click', buttonName(e.button), e.buttons, '');
+});
+
+target.addEventListener('dblclick', e => {
+    addRow('dblclick', 'click', buttonName(e.button), e.buttons, '');
+});
+
+target.addEventListener('auxclick', e => {
+    addRow('auxclick', 'click', buttonName(e.button), e.buttons, '');
+});
+
+target.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    addRow('contextmenu', 'click', '', '', '(prevented)');
+});
+
+target.addEventListener('mousemove', e => {
+    document.getElementById('pos').textContent = `x: ${e.offsetX}, y: ${e.offsetY}`;
+    if (logMove) {
+        addRow('mousemove', 'move', '', e.buttons, `dx:${e.movementX} dy:${e.movementY}`);
+    }
+});
+
+target.addEventListener('wheel', e => {
+    e.preventDefault();
+    addRow('wheel', 'wheel', '', e.buttons, `dX:${e.deltaX.toFixed(1)} dY:${e.deltaY.toFixed(1)} mode:${e.deltaMode}`);
+}, { passive: false });
+
+const logData = [];
+function clearLog() { log.innerHTML = ''; logData.length = 0; eventCount = 0; countEl.textContent = 0; lastTime = 0; }
+function saveLog() {
+    const text = logData.map(r => r.join('\t')).join('\n');
+    const blob = new Blob([`time\tdt_ms\tevent\tbutton\tbuttons\tdetail\n${text}`], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mouse-log.tsv';
+    a.click();
+}
+function toggleMove() {
+    logMove = !logMove;
+    document.getElementById('move-toggle').textContent = logMove ? 'ON' : 'OFF';
+}
+</script>
+</body>
+</html>

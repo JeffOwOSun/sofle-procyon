@@ -38,7 +38,7 @@ CLIP_HEIGHT = 3.8           # height of notch (from bottom of plate)
 
 BOTTOM_WALL = 2.0           # bottom case wall thickness
 BOTTOM_FLOOR = 2.0          # floor thickness
-BOTTOM_HEIGHT = 10.5        # internal height (7.5mm plate-to-PCB gap + 3mm standoff)
+BOTTOM_HEIGHT = 9.5         # internal height (6.5mm plate-to-PCB gap + 3mm standoff)
 PCB_STANDOFF_H = 3.0        # PCB sits this high
 STANDOFF_OD = 5.0           # standoff outer diameter
 SCREW_D_THROUGH = 2.25      # through-hole diameter (plate, matches PCB holes)
@@ -359,9 +359,9 @@ def make_bottom(side):
         )
 
     # USB-C cutouts through the walls
-    BOTTOM_USB_W = 12.0     # cutout width
-    BOTTOM_USB_H = 6.0      # cutout height (fits within wall above floor)
-    z_center = BOTTOM_FLOOR + PCB_STANDOFF_H  # center at standoff height from top
+    BOTTOM_USB_W = 14.0     # cutout width
+    BOTTOM_USB_H = 8.0      # cutout height
+    z_center = BOTTOM_FLOOR + PCB_STANDOFF_H + 0.75  # centered on USB-C port (PCB top + half port height)
     wall_depth = 20  # generous depth to ensure cut goes through wall
     for port in data.get('usbc', []):
         rot = port.get('rotation', 0)
